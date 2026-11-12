@@ -76,6 +76,40 @@ class BackgroundPoller:
         self.slack_seen_max = 4000
         self.alert_state = {}         # host -> {owd,bitrate,drops,error,active_sessions}
         self._slack_initialized = set()
+        # Latest fetch result per device id, shared with /data (guarded by _latest_lock)
+        self._latest_lock = threading.Lock()
+        self._latest = {}             # device id -> (base, ok, payload, wall-clock time)
+
+    # ── Latest result cache ───────────────────────────────────────────────
+
+    def _set_latest(self, device_id, base, ok, payload):
+        with self._latest_lock:
+            self._latest[int(device_id)] = (base, ok, payload, time.time())
+
+    def _prune_latest(self, device_ids):
+        keep = {int(i) for i in device_ids}
+        with self._latest_lock:
+            for k in [k for k in self._latest if k not in keep]:
+                del self._latest[k]
+
+    def get_latest(self, device_id, base, max_age=None):
+        """Return (ok, payload, wall-clock time) of the last poll of this device
+        if it was fetched from the same base URL and is younger than max_age
+        seconds (default: 3 poll intervals), else None."""
+        if max_age is None:
+            max_age = 3 * self.interval
+        try:
+            key = int(device_id)
+        except Exception:
+            return None
+        with self._latest_lock:
+            entry = self._latest.get(key)
+        if not entry:
+            return None
+        e_base, ok, payload, at = entry
+        if e_base != base or (time.time() - at) > max_age:
+            return None
+        return ok, payload, at
 
     # ── Slack helpers ─────────────────────────────────────────────────────
 
@@ -276,6 +310,7 @@ class BackgroundPoller:
                 with connect_db() as conn:
                     cur = conn.execute("SELECT id,name,protocol,host,port,api_path,token FROM devices")
                     rows = cur.fetchall()
+                self._prune_latest([r[0] for r in rows])
 
                 for row in rows:
                     try:
@@ -288,6 +323,7 @@ class BackgroundPoller:
                             p = 8896
                         base = f"{protocol}://{host}:{p}"
                         ok, payload = fetch_streamhub(base, token or None, timeout=5)
+                        self._set_latest(did, base, ok, payload)
                         # Always observe, even if not ok (logger can decide)
                         try:
                             device_id = (payload.get('characteristics') or {}).get('identifier') \
@@ -547,8 +583,19 @@ def _persist_output_map(host: str, payload: dict):
             pass
 
 
+_DB_INIT_LOCK = threading.Lock()
+_DB_INIT_DONE = None  # path of the DB whose schema has been initialised
+
 def _init_db():
     """Run once at startup — creates tables, indexes, runs migrations."""
+    global _DB_INIT_DONE
+    with _DB_INIT_LOCK:
+        if _DB_INIT_DONE == str(DB_PATH):
+            return
+        _init_db_schema()
+        _DB_INIT_DONE = str(DB_PATH)
+
+def _init_db_schema():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -738,10 +785,26 @@ def _init_db():
             name        TEXT,
             started_at  TEXT NOT NULL,
             ended_at    TEXT NOT NULL,
-            created_at  TEXT
+            created_at  TEXT,
+            tz_offset   INTEGER DEFAULT 0
         )""")
+    # Migrations for existing DBs
+    try:
+        _rsc = {r[1] for r in conn.execute("PRAGMA table_info(srt_report_session)").fetchall()}
+        if "tz_offset" not in _rsc:
+            conn.execute("ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0")
+    except Exception: pass
+    try:
+        _csc = {r[1] for r in conn.execute("PRAGMA table_info(srt_connection_sample)").fetchall()}
+        if "srt_version" not in _csc:
+            conn.execute("ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT")
+    except Exception: pass
     conn.commit()
     conn.close()
+
+
+# Schema is created once at import, before any thread (pollers, request handlers) uses the DB
+_init_db()
 
 
 def connect_db():
@@ -752,66 +815,6 @@ def connect_db():
     conn.execute("PRAGMA busy_timeout=2000;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA cache_size=-20000;")
-    # Ensure critical tables always exist (idempotent, fast after first run)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS devices ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " name TEXT, protocol TEXT, host TEXT, port INTEGER, api_path TEXT, token TEXT)"
-    )
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS device_output_map (
-            device_host  TEXT NOT NULL,
-            input_index  INTEGER NOT NULL,
-            output_name  TEXT NOT NULL,
-            PRIMARY KEY (device_host, output_name)
-        )""")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS srt_report_session (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            route_id    TEXT NOT NULL,
-            route_name  TEXT,
-            name        TEXT,
-            started_at  TEXT NOT NULL,
-            ended_at    TEXT NOT NULL,
-            created_at  TEXT,
-            tz_offset   INTEGER DEFAULT 0
-        )""")
-    # Migration: add tz_offset if missing (existing DBs)
-    try:
-        conn.execute('ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0')
-    except Exception: pass
-    try:
-        conn.execute('ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT')
-    except Exception: pass
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS streamhub_log (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            ts      TEXT,
-            node    TEXT,
-            level   TEXT,
-            message TEXT,
-            raw     TEXT,
-            fp      TEXT
-        )""")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS device_slack ("
-        "device_id INTEGER PRIMARY KEY,"
-        "notify_session INTEGER DEFAULT 1,"
-        "notify_drops INTEGER DEFAULT 1,"
-        "notify_owd_threshold INTEGER DEFAULT 0,"
-        "notify_bitrate_min INTEGER DEFAULT 0,"
-        "notify_poller_error INTEGER DEFAULT 1,"
-        "notify_logs INTEGER DEFAULT 1,"
-        "notify_connection INTEGER DEFAULT 1,"
-        "notify_paused INTEGER DEFAULT 0,"
-        "ignore_contains TEXT DEFAULT '[]')"
-    )
-    try:
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shlog_fp ON streamhub_log(fp)")
-    except Exception: pass
-    _ensure_db_indexes(conn)
     return conn
 
 def _persist_logs(host: str, entries: list):
@@ -986,7 +989,11 @@ class SRTGatewayPoller:
             time.sleep(sleep)
 
     def _purge_old_samples(self):
-        """Delete srt_route_sample and srt_connection_sample older than SRT_RETENTION_DAYS."""
+        """Hourly retention purge.
+        - srt_route_sample / srt_connection_sample / srt_event: SRT_RETENTION_DAYS (default 30)
+        - live_session + live_sample: SP_SESSION_RETENTION_DAYS (default 0 = keep forever)
+        - streamhub_log: SP_LOG_RETENTION_DAYS (default 90, 0 = keep forever)
+        """
         try:
             days = int(os.getenv('SRT_RETENTION_DAYS') or 30)
         except Exception:
@@ -996,7 +1003,67 @@ class SRTGatewayPoller:
         with connect_db() as c:
             c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,))
             c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,))
+            c.execute('DELETE FROM srt_event WHERE ts < ?', (cutoff,))
         cherrypy.log(f'[srt_gw] purged samples older than {days} days (cutoff {cutoff})')
+        # Sessions first: logs kept only for the sake of a purged session can then go too
+        try:
+            self._purge_old_sessions()
+        except Exception as _se:
+            cherrypy.log(f'[retention] session purge error: {_se}')
+        try:
+            self._purge_old_logs()
+        except Exception as _le:
+            cherrypy.log(f'[retention] log purge error: {_le}')
+
+    @staticmethod
+    def _retention_days(env_name, default):
+        try:
+            v = os.getenv(env_name)
+            return int(v) if (v is not None and str(v).strip() != '') else default
+        except Exception:
+            return default
+
+    def _purge_old_sessions(self):
+        """Delete ended live sessions (and their samples) older than
+        SP_SESSION_RETENTION_DAYS. Disabled by default (0): recorded sessions
+        are kept forever. Sessions still active (ended_at NULL) are never deleted."""
+        days = self._retention_days('SP_SESSION_RETENTION_DAYS', 0)
+        if days <= 0:
+            return
+        from datetime import datetime as _dtp, timedelta as _tdd
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        # live_session timestamps are ISO ('YYYY-MM-DDTHH:MM:SS.ffffff'): normalise before comparing
+        cond = ("ended_at IS NOT NULL AND ended_at <> '' "
+                "AND replace(substr(ended_at,1,19),'T',' ') < ?")
+        with connect_db() as c:
+            c.execute('DELETE FROM live_sample WHERE session_id IN '
+                      '(SELECT id FROM live_session WHERE ' + cond + ')', (cutoff,))
+            n = c.execute('DELETE FROM live_session WHERE ' + cond, (cutoff,)).rowcount
+        cherrypy.log(f'[retention] purged {n} session(s) ended more than {days} days ago (cutoff {cutoff})')
+
+    def _purge_old_logs(self):
+        """Delete streamhub_log rows older than SP_LOG_RETENTION_DAYS (default 90,
+        0 disables), except those inside the [started_at, ended_at] window of an
+        existing live_session on the same device: session reports/PDFs use them."""
+        days = self._retention_days('SP_LOG_RETENTION_DAYS', 90)
+        if days <= 0:
+            return
+        from datetime import datetime as _dtp, timedelta as _tdd
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        # streamhub_log.ts is 'YYYY-MM-DD HH:MM:SS', live_session uses ISO with 'T'
+        # and microseconds: compare on the first 19 chars with 'T' replaced, exactly
+        # like the session report queries do.
+        with connect_db() as c:
+            n = c.execute(
+                "DELETE FROM streamhub_log WHERE ts < ? AND NOT EXISTS ("
+                " SELECT 1 FROM live_session s"
+                " WHERE s.device_host = streamhub_log.device_host"
+                " AND replace(substr(s.started_at,1,19),'T',' ') <= streamhub_log.ts"
+                " AND (s.ended_at IS NULL OR s.ended_at = ''"
+                "      OR replace(substr(s.ended_at,1,19),'T',' ') >= streamhub_log.ts))",
+                (cutoff,)
+            ).rowcount
+        cherrypy.log(f'[retention] purged {n} StreamHub log(s) older than {days} days (cutoff {cutoff})')
 
     def _poll_all(self):
         with connect_db() as c:
@@ -2794,8 +2861,19 @@ class App:
 
         # Pour StreamHub “ancien probe”, on tape la racine + ?api_key=
         base = f"{d['protocol']}://{d['host']}:{d['port']}"
-        ok, payload = fetch_streamhub(base, d.get("token") or None, timeout=5)
         import json
+        # Serve the background poller's latest result when it is fresh:
+        # it already fetched (and observed) this device, no need to hit it again.
+        cached = None
+        try:
+            if POLLER is not None:
+                cached = POLLER.get_latest(d['id'], base)
+        except Exception:
+            cached = None
+        if cached is not None:
+            ok, payload, fetched_at = cached
+            return json.dumps({"ok": ok, "payload": payload, "timestamp": int(fetched_at*1000)}).encode("utf-8")
+        ok, payload = fetch_streamhub(base, d.get("token") or None, timeout=5)
         
         # Observe payload for live logging
         try:

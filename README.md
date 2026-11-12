@@ -107,7 +107,9 @@ Command-line flags, with the equivalent environment variable for each one:
 > - `-password` (`SP_PASSWORD`): Password for the login portal (default: admin)
 > - `-mode` (`SP_MODE`): `http` for direct access, `proxy` when working behind a Nginx hosting HTTPS certificates (default: http)
 > - `-max_srtgateway` (`MAX_SRTGATEWAY`): Maximum number of SRT Gateway devices (default: unlimited)
-> - `-srt_retention_days` (`SRT_RETENTION_DAYS`): Sample retention in days for SRT Gateway (default: 30)
+> - `-srt_retention_days` (`SRT_RETENTION_DAYS`): Sample and event retention in days for SRT Gateway (default: 30)
+> - `-log_retention_days` (`SP_LOG_RETENTION_DAYS`): StreamHub log retention in days; logs that fall inside a recorded session are always kept as long as the session exists (default: 90, `0` = keep forever)
+> - `-session_retention_days` (`SP_SESSION_RETENTION_DAYS`): Retention in days for ended recorded sessions and their samples; active sessions are never deleted (default: `0` = keep forever)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
