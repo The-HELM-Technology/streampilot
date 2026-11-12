@@ -13,7 +13,8 @@ from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     
 import json, html as _html
 import os, time, cherrypy
-import hashlib, secrets, functools
+import hashlib, secrets, functools, hmac
+from urllib.parse import urlsplit
 import threading
 import random
 from collections import deque
@@ -59,7 +60,13 @@ lookup = TemplateLookup(
     input_encoding="utf-8",
     output_encoding="utf-8",
     encoding_errors="replace",
+    default_filters=["h"],  # HTML-escape every ${...} unless marked "| n"
 )
+
+def _js_json(value):
+    """json.dumps() that is safe to embed inside an inline <script> block."""
+    return (json.dumps(value)
+            .replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026'))
 
 # --- Background poller for StreamHub data ---
 
@@ -772,7 +779,8 @@ def render(tpl, **ctx):
 
 def _gw_page(title: str, body_content: str, user=None) -> bytes:
     """Minimal HTML wrapper for SRT Gateway pages (no Mako dependency)."""
-    u = (user or {}).get('username', '')
+    u = _html.escape(str((user or {}).get('username', '') or ''))
+    title = _html.escape('' if title is None else str(title))
     return (
         "<!doctype html><html><head>"
         "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1406,9 +1414,14 @@ class App:
         return body.encode('utf-8')
 
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def login_post(self, username='', password=''):
         expected_user, expected_pass = _get_credentials()
-        if username.strip() == expected_user and password == expected_pass:
+        user_ok = hmac.compare_digest(str(username).strip().encode('utf-8'), expected_user.encode('utf-8'))
+        pass_ok = hmac.compare_digest(str(password).encode('utf-8'), expected_pass.encode('utf-8'))
+        if user_ok and pass_ok:
+            # new session id on privilege change (prevents session fixation)
+            cherrypy.session.regenerate()
             cherrypy.session['username'] = username.strip()
             raise cherrypy.HTTPRedirect('/')
         raise cherrypy.HTTPRedirect('/login?msg=error')
@@ -1444,19 +1457,19 @@ class App:
                 br   = r.get("total_bitrate_mbps")
                 route_rows += (
                     "<tr>"
-                    + "<td>" + str(r.get("name","")) + "</td>"
+                    + "<td>" + _html.escape(str(r.get("name",""))) + "</td>"
                     + "<td>" + sbadge + "</td>"
                     + "<td>" + ("%.2f Mb/s" % br if br is not None else "—") + "</td>"
                     + "<td>" + ("%.1f ms" % rtt if rtt is not None else "—") + "</td>"
                     + "<td>" + ("%.2f%%" % loss if loss is not None else "—") + "</td>"
-                    + "<td>" + str(r.get("active_connections", 0)) + "</td>"
-                    + '<td><a href="/gateway_route?host=' + host + "&route_id=" + str(r.get("id","")) + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
+                    + "<td>" + _html.escape(str(r.get("active_connections", 0))) + "</td>"
+                    + '<td><a href="/gateway_route?host=' + _html.escape(str(host)) + "&route_id=" + _html.escape(str(r.get("id",""))) + '" class="btn btn-sm btn-outline-primary">Details</a></td>'
                     + "</tr>"
                 )
             rows.append(
                 "<div class=\"card mb-3\">"
                 + "<div class=\"card-header d-flex justify-content-between align-items-center\">"
-                + "<strong>" + name + " (" + host + ")</strong>" + status_badge
+                + "<strong>" + _html.escape(str(name)) + " (" + _html.escape(str(host)) + ")</strong>" + status_badge
                 + "</div>"
                 + "<div class=\"card-body p-0\">"
                 + "<table class=\"table table-sm mb-0\"><thead><tr>"
@@ -1504,8 +1517,8 @@ class App:
         for conn in conns[:20]:
             ts, direction, addr, port, br, rtt, loss = conn
             conns_html += (
-                "<tr><td>" + str(ts) + "</td><td>" + str(direction) + "</td>"
-                + "<td>" + str(addr) + ":" + str(port) + "</td>"
+                "<tr><td>" + _html.escape(str(ts)) + "</td><td>" + _html.escape(str(direction)) + "</td>"
+                + "<td>" + _html.escape(str(addr)) + ":" + _html.escape(str(port)) + "</td>"
                 + "<td>" + ("%.2f" % br if br is not None else "—") + "</td>"
                 + "<td>" + ("%.1f" % rtt if rtt is not None else "—") + "</td>"
                 + "<td>" + ("%.2f%%" % loss if loss is not None else "—") + "</td></tr>"
@@ -1523,6 +1536,7 @@ class App:
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_add_device(self, name=None, host=None, port="443",
                             protocol="https", username="haiadmin", password="haiadmin"):
         if host:
@@ -1549,6 +1563,7 @@ class App:
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_delete_device(self, id=None):
         if id:
             with connect_db() as c:
@@ -1619,8 +1634,8 @@ class App:
                 + '<td>' + esc(gw_name) + '</td>'
                 + '<td class="fw-semibold">' + esc(rname) + '</td>'
                 + '<td>' + sbadge + '</td>'
-                + '<td class="small text-muted">' + fmt_ts(first_seen) + '</td>'
-                + '<td class="small text-muted">' + fmt_ts(last_seen) + '</td>'
+                + '<td class="small text-muted">' + esc(fmt_ts(first_seen)) + '</td>'
+                + '<td class="small text-muted">' + esc(fmt_ts(last_seen)) + '</td>'
                 + '<td><span class="badge text-bg-secondary">' + str(evts) + '</span></td>'
                 + '<td>'
                 + '<a class="btn btn-sm btn-outline-primary me-1" href="/gateway_logs_route?host='
@@ -1650,7 +1665,7 @@ class App:
                 items.append(
                     '<tr><td colspan="7" class="p-0">'
                     '<div class="bd-callout bd-callout-info w-100 mb-0" role="separator">'
-                    + day_lbl + '</div></td></tr>'
+                    + esc(day_lbl) + '</div></td></tr>'
                 )
                 current_day = day_lbl
             items.append(
@@ -1658,8 +1673,8 @@ class App:
                 + '<td>' + esc(gw_name) + '</td>'
                 + '<td class="fw-semibold">' + esc(rname) + '</td>'
                 + '<td>' + sbadge + '</td>'
-                + '<td class="small text-muted">' + fmt_ts(first_seen) + '</td>'
-                + '<td class="small text-muted">' + fmt_ts(last_seen) + '</td>'
+                + '<td class="small text-muted">' + esc(fmt_ts(first_seen)) + '</td>'
+                + '<td class="small text-muted">' + esc(fmt_ts(last_seen)) + '</td>'
                 + '<td><span class="badge text-bg-secondary">' + str(evts) + '</span></td>'
                 + '<td>'
                 + '<a class="btn btn-sm btn-outline-primary me-1" href="/gateway_logs_route?host='
@@ -1750,8 +1765,8 @@ class App:
             ip_cell = ('<code class="small">' + esc(ip) + '</code>') if ip else '<span class="text-muted">—</span>'
             rows_html += ('<tr data-utc="' + esc(str(ts)[:19]) + '">'
                           + '<td class="text-muted small local-time"></td>'
-                          + '<td class="text-muted small">' + dt + '</td>'
-                          + '<td class="text-muted small">' + tm + '</td>'
+                          + '<td class="text-muted small">' + esc(dt) + '</td>'
+                          + '<td class="text-muted small">' + esc(tm) + '</td>'
                           + '<td>' + badge + '</td>'
                           + '<td class="small text-muted">' + esc(detail or '') + '</td>'
                           + '<td>' + ip_cell + '</td></tr>')
@@ -1842,6 +1857,7 @@ class App:
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_logs_delete(self, host=None, route_id=None):
         if host and route_id:
             with connect_db() as c:
@@ -2520,7 +2536,7 @@ class App:
                 body.append(f'<td>{spark_svg(host)}</td>')
                 body.append(f'<td>{esc(active)}</td>')
                 body.append('<td>')
-                body.append(f'<a class="btn btn-sm btn-outline-primary" href="/data?id={did}">Ping /data</a>')
+                body.append(f'<a class="btn btn-sm btn-outline-primary" href="/data?id={esc(did)}">Ping /data</a>')
                 body.append('</td>')
                 body.append('</tr>')
         else:
@@ -2568,7 +2584,7 @@ class App:
             body.append(f'<td>{spark_svg(gwhost, srt=True)}</td>')
             body.append(f'<td>{esc(gw_running_routes)} route(s) running</td>')
             body.append('<td>')
-            body.append(f'<a class="btn btn-sm btn-outline-primary" href="/gateway_data_raw?host={gwhost}">Ping /data</a>')
+            body.append(f'<a class="btn btn-sm btn-outline-primary" href="/gateway_data_raw?host={esc(gwhost)}">Ping /data</a>')
             body.append('</td>')
             body.append('</tr>')
         body.extend(['</tbody></table></div>',
@@ -2641,6 +2657,7 @@ class App:
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def devices_add(self, name="StreamHub", protocol="https", host="", port="443", api_path="/rest-api/", token=""):
         name = (name or "StreamHub").strip() or "StreamHub"
         host = (host or "").strip()
@@ -2672,6 +2689,7 @@ class App:
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def devices_delete(self, id=None):
         if id:
             with connect_db() as db:
@@ -3322,11 +3340,11 @@ class App:
         page_title = f"Session #{s_id} — {s_title or (s_disp or s_dev) or ''}"
 
         import json as _json
-        _t_end_js = ("new Date(" + _json.dumps(str(s_end)) + ").getTime()") if s_end else "Date.now()"
-        _events_js_tpl = '(function(){\nvar SESSION_ID=__SID__;\nvar T_START=new Date(__TSTART__).getTime();\nvar T_END=__TEND__;\nvar NL=String.fromCharCode(10);\nvar LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};\nvar LEVEL_BADGE={ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"};\nfunction _pad2(n){return String(n).padStart(2,"0");}\nfunction fmtEvUTC(ts){return ts?String(ts).replace("T"," ").substring(0,19):"";}\nfunction fmtEvLocal(ts){if(!ts)return "";var s=String(ts);if(s.length>=19)s=s.substring(0,19);if(s.indexOf("T")<0)s=s.replace(" ","T");var d=new Date(s+"Z");if(isNaN(d.getTime()))return "";var off=-d.getTimezoneOffset(),sign=off>=0?"+":"-",ab=Math.abs(off);var lbl="UTC"+sign+_pad2(Math.floor(ab/60))+":"+_pad2(ab%60);return d.getFullYear()+"-"+_pad2(d.getMonth()+1)+"-"+_pad2(d.getDate())+" "+_pad2(d.getHours())+":"+_pad2(d.getMinutes())+":"+_pad2(d.getSeconds())+" "+lbl;}\nfunction fmtEvTsHTML(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(u+" UTC<br><span class=\'text-muted\'>"+l+"</span>"):(u+" UTC");}\nfunction fmtEvTsTip(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(u+" UTC"+NL+l):(u+" UTC");}\nvar tip=document.createElement("div");\ntip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";\ndocument.body.appendChild(tip);\nfunction renderEvents(evs){\nvar el=document.getElementById("eventsTimeline");\nvar listWrap=document.getElementById("eventsListWrap");\nvar tbody=document.getElementById("eventsList");\nif(!evs||!evs.length){el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\\u00e9 pour cette session.</span>";listWrap.style.display="none";return;}\nvar W=1000,H=44,cy=H/2,tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;\nvar dur=tEnd-T_START||1;\nvar svg=\'<svg width="100%" height="\'+H+\'" viewBox="0 0 \'+W+\' \'+H+\'" xmlns="http://www.w3.org/2000/svg" style="display:block">\';\nsvg+=\'<rect x="0" y="\'+(cy-2)+\'" width="\'+W+\'" height="4" fill="#dee2e6" rx="2"/>\';\nevs.forEach(function(ev,i){\nvar t=new Date(ev.ts).getTime();\nvar x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));\nvar col=LEVEL_COLOR[ev.level]||"#0d6efd";\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");\nsvg+=\'<line x1="\'+x+\'" y1="4" x2="\'+x+\'" y2="\'+(H-4)+\'" stroke="\'+col+\'" stroke-width="1.5" opacity="0.4"/>\';\nsvg+=\'<circle cx="\'+x+\'" cy="\'+cy+\'" r="5" fill="\'+col+\'" data-idx="\'+i+\'" data-ts="\'+ev.ts+\'" data-lvl="\'+(ev.level||"")+\'" data-msg="\'+msg+\'" style="cursor:pointer"/>\';\n});\nsvg+=\'</svg>\';el.innerHTML=svg;\nvar rows="";\nevs.forEach(function(ev,i){\nvar badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");\nrows+=\'<tr data-idx="\'+i+\'" style="cursor:pointer"><td class="text-muted">\'+fmtEvTsHTML(ev.ts)+\'</td><td>\'+badge+\'</td><td>\'+msg+\'</td></tr>\';\n});\ntbody.innerHTML=rows;listWrap.style.display="block";\nfunction highlightDot(idx,on){var c=el.querySelector(\'circle[data-idx="\'+idx+\'"]\');if(!c)return;c.setAttribute("r",on?"9":"5");c.setAttribute("stroke",on?"#fff":"none");c.setAttribute("stroke-width",on?"2":"0");}\nfunction highlightRow(idx,on){var tr=tbody.querySelector(\'tr[data-idx="\'+idx+\'"]\');if(!tr)return;tr.style.background=on?"#e8f4fd":"";if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}\ntbody.querySelectorAll("tr").forEach(function(tr){var idx=tr.dataset.idx;tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});});\nel.querySelectorAll("circle").forEach(function(c){\nc.addEventListener("mouseenter",function(){highlightDot(c.dataset.idx,true);highlightRow(c.dataset.idx,true);tip.textContent=fmtEvTsTip(c.dataset.ts)+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;tip.style.display="block";});\nc.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});\nc.addEventListener("mouseleave",function(){highlightDot(c.dataset.idx,false);highlightRow(c.dataset.idx,false);tip.style.display="none";});\n});}\nfunction fetchEvents(){fetch("/session_events?session_id="+SESSION_ID).then(function(r){return r.json();}).then(function(data){renderEvents(data.ok?data.events:[]);}).catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}\nwindow.refreshEvents=fetchEvents;fetchEvents();\n})();'
+        _t_end_js = ("new Date(" + _js_json(str(s_end)) + ").getTime()") if s_end else "Date.now()"
+        _events_js_tpl = '(function(){\nvar SESSION_ID=__SID__;\nvar T_START=new Date(__TSTART__).getTime();\nvar T_END=__TEND__;\nvar NL=String.fromCharCode(10);\nvar LEVEL_COLOR={ERROR:"#dc3545",WARNING:"#fd7e14",WARN:"#fd7e14",INFO:"#0d6efd",DEBUG:"#6c757d"};\nvar LEVEL_BADGE={ERROR:"<span class=\'badge\' style=\'background:#dc3545\'>ERROR</span>",WARNING:"<span class=\'badge\' style=\'background:#fd7e14\'>WARN</span>",INFO:"<span class=\'badge\' style=\'background:#0d6efd\'>INFO</span>",DEBUG:"<span class=\'badge\' style=\'background:#6c757d\'>DEBUG</span>"};\nfunction _pad2(n){return String(n).padStart(2,"0");}\nfunction fmtEvUTC(ts){return ts?String(ts).replace("T"," ").substring(0,19):"";}\nfunction fmtEvLocal(ts){if(!ts)return "";var s=String(ts);if(s.length>=19)s=s.substring(0,19);if(s.indexOf("T")<0)s=s.replace(" ","T");var d=new Date(s+"Z");if(isNaN(d.getTime()))return "";var off=-d.getTimezoneOffset(),sign=off>=0?"+":"-",ab=Math.abs(off);var lbl="UTC"+sign+_pad2(Math.floor(ab/60))+":"+_pad2(ab%60);return d.getFullYear()+"-"+_pad2(d.getMonth()+1)+"-"+_pad2(d.getDate())+" "+_pad2(d.getHours())+":"+_pad2(d.getMinutes())+":"+_pad2(d.getSeconds())+" "+lbl;}\nfunction fmtEvTsHTML(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(escH(u)+" UTC<br><span class=\'text-muted\'>"+l+"</span>"):(escH(u)+" UTC");}\nfunction fmtEvTsTip(ts){var u=fmtEvUTC(ts),l=fmtEvLocal(ts);return l?(u+" UTC"+NL+l):(u+" UTC");}\nvar tip=document.createElement("div");\ntip.style.cssText="position:fixed;background:#212529;color:#fff;padding:5px 10px;border-radius:5px;font-size:11px;pointer-events:none;display:none;max-width:480px;z-index:9999;white-space:pre-wrap;";\ndocument.body.appendChild(tip);\nfunction renderEvents(evs){\nvar el=document.getElementById("eventsTimeline");\nvar listWrap=document.getElementById("eventsListWrap");\nvar tbody=document.getElementById("eventsList");\nif(!evs||!evs.length){el.innerHTML="<span class=\'text-muted small\'>Aucun event trouv\\u00e9 pour cette session.</span>";listWrap.style.display="none";return;}\nvar W=1000,H=44,cy=H/2,tEnd=T_END;if(tEnd<=T_START)tEnd=T_START+1;\nvar dur=tEnd-T_START||1;\nvar svg=\'<svg width="100%" height="\'+H+\'" viewBox="0 0 \'+W+\' \'+H+\'" xmlns="http://www.w3.org/2000/svg" style="display:block">\';\nsvg+=\'<rect x="0" y="\'+(cy-2)+\'" width="\'+W+\'" height="4" fill="#dee2e6" rx="2"/>\';\nevs.forEach(function(ev,i){\nvar t=new Date(ev.ts).getTime();\nvar x=Math.max(6,Math.min(W-6,Math.round((t-T_START)/dur*W)));\nvar col=LEVEL_COLOR[ev.level]||"#0d6efd";\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");\nsvg+=\'<line x1="\'+x+\'" y1="4" x2="\'+x+\'" y2="\'+(H-4)+\'" stroke="\'+col+\'" stroke-width="1.5" opacity="0.4"/>\';\nsvg+=\'<circle cx="\'+x+\'" cy="\'+cy+\'" r="5" fill="\'+col+\'" data-idx="\'+i+\'" data-ts="\'+escH(ev.ts)+\'" data-lvl="\'+escH(ev.level||"")+\'" data-msg="\'+msg+\'" style="cursor:pointer"/>\';\n});\nsvg+=\'</svg>\';el.innerHTML=svg;\nvar rows="";\nevs.forEach(function(ev,i){\nvar badge=LEVEL_BADGE[ev.level]||LEVEL_BADGE["INFO"];\nvar msg=(ev.message||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");\nrows+=\'<tr data-idx="\'+i+\'" style="cursor:pointer"><td class="text-muted">\'+fmtEvTsHTML(ev.ts)+\'</td><td>\'+badge+\'</td><td>\'+msg+\'</td></tr>\';\n});\ntbody.innerHTML=rows;listWrap.style.display="block";\nfunction highlightDot(idx,on){var c=el.querySelector(\'circle[data-idx="\'+idx+\'"]\');if(!c)return;c.setAttribute("r",on?"9":"5");c.setAttribute("stroke",on?"#fff":"none");c.setAttribute("stroke-width",on?"2":"0");}\nfunction highlightRow(idx,on){var tr=tbody.querySelector(\'tr[data-idx="\'+idx+\'"]\');if(!tr)return;tr.style.background=on?"#e8f4fd":"";if(on)tr.scrollIntoView({block:"nearest",behavior:"smooth"});}\ntbody.querySelectorAll("tr").forEach(function(tr){var idx=tr.dataset.idx;tr.addEventListener("mouseenter",function(){highlightDot(idx,true);});tr.addEventListener("mouseleave",function(){highlightDot(idx,false);});});\nel.querySelectorAll("circle").forEach(function(c){\nc.addEventListener("mouseenter",function(){highlightDot(c.dataset.idx,true);highlightRow(c.dataset.idx,true);tip.textContent=fmtEvTsTip(c.dataset.ts)+"  ["+c.dataset.lvl+"]"+NL+c.dataset.msg;tip.style.display="block";});\nc.addEventListener("mousemove",function(e){tip.style.left=(e.clientX+14)+"px";tip.style.top=(e.clientY-10)+"px";});\nc.addEventListener("mouseleave",function(){highlightDot(c.dataset.idx,false);highlightRow(c.dataset.idx,false);tip.style.display="none";});\n});}\nfunction fetchEvents(){fetch("/session_events?session_id="+SESSION_ID).then(function(r){return r.json();}).then(function(data){renderEvents(data.ok?data.events:[]);}).catch(function(){document.getElementById("eventsTimeline").innerHTML="<span class=\'text-muted small\'>Erreur chargement events.</span>";});}\nwindow.refreshEvents=fetchEvents;fetchEvents();\n})();'
         _events_js = (_events_js_tpl
             .replace('__SID__', str(s_id))
-            .replace('__TSTART__', _json.dumps(str(s_start or '')))
+            .replace('__TSTART__', _js_json(str(s_start or '')))
             .replace('__TEND__', _t_end_js)
         )
         _events_html_tpl = '<div class="mt-4"><div class="fw-semibold small mb-1">Events <span class="text-muted fw-normal">(logs StreamHub)</span></div><div id="eventsTimeline" style="min-height:44px;border:1px solid #dee2e6;border-radius:4px;padding:4px 8px;"><span class="text-muted small">Chargement…</span></div><div id="eventsListWrap" class="mt-2" style="display:none;"><table class="table table-sm table-hover mb-0" style="font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid #dee2e6;border-radius:4px;"><thead class="table-light"><tr><th style="width:230px">Timestamp <span class="text-muted fw-normal">(UTC + local)</span></th><th style="width:70px">Level</th><th>Message</th></tr></thead><tbody id="eventsList"></tbody></table></div></div>'
@@ -3346,6 +3364,7 @@ class App:
             <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
             <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+            <script>function escH(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}</script>
             <style>
               #map { height: 70vh; }
               .badge-link { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -3505,8 +3524,8 @@ class App:
                     const id = 'lf_' + idx;
                     const wrap = document.createElement('div');
                     wrap.className = 'form-check form-check-inline m-0';
-                    wrap.innerHTML = '<input class="form-check-input" type="checkbox" id="'+id+'" data-name="'+name+'" checked>'+
-                                     '<label class="form-check-label small" for="'+id+'">'+name+'</label>';
+                    wrap.innerHTML = '<input class="form-check-input" type="checkbox" id="'+id+'" data-name="'+escH(name)+'" checked>'+
+                                     '<label class="form-check-label small" for="'+id+'">'+escH(name)+'</label>';
                     filterHost.appendChild(wrap);
                   });
                   // handlers
@@ -3847,8 +3866,8 @@ async function repoll(){
           const id = 'lf_' + linkNames.length;
           const wrap = document.createElement('div');
           wrap.className = 'form-check form-check-inline m-0';
-          wrap.innerHTML = '<input class="form-check-input" type="checkbox" id="'+id+'" data-name="'+name+'" checked>'+
-                           '<label class="form-check-label small" for="'+id+'">'+name+'</label>';
+          wrap.innerHTML = '<input class="form-check-input" type="checkbox" id="'+id+'" data-name="'+escH(name)+'" checked>'+
+                           '<label class="form-check-label small" for="'+id+'">'+escH(name)+'</label>';
           filterHost.appendChild(wrap);
           const cb = wrap.querySelector('input');
           cb.addEventListener('change', function(){
@@ -3989,10 +4008,10 @@ async function repoll(){
                 var sIso = ts.length>=19 ? ts.substring(0,19) : ts;
                 if(sIso.indexOf('T')<0) sIso = sIso.replace(' ','T');
                 var d = new Date(sIso+'Z');
-                if(isNaN(d.getTime())) return utc+' UTC';
+                if(isNaN(d.getTime())) return escH(utc)+' UTC';
                 var local = d.getFullYear()+'-'+_pad2(d.getMonth()+1)+'-'+_pad2(d.getDate())+' '+
                             _pad2(d.getHours())+':'+_pad2(d.getMinutes())+':'+_pad2(d.getSeconds());
-                return '<div>'+utc+' <span class="text-muted">UTC</span></div>'+
+                return '<div>'+escH(utc)+' <span class="text-muted">UTC</span></div>'+
                        '<div class="text-muted">'+local+' '+_tzLabel(d)+'</div>';
               }
               tsStart.innerHTML = fmtTs(samples[0].ts);
@@ -4015,10 +4034,10 @@ async function repoll(){
                 links.sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); });
                 let dropsHtml = '';
                 if (s.drops_video && s.drops_video > 0) {
-                  dropsHtml += '<span class="badge me-1 mb-1" style="background:#ff0000;color:#fff;">Dropped Video: ' + s.drops_video + '</span>';
+                  dropsHtml += '<span class="badge me-1 mb-1" style="background:#ff0000;color:#fff;">Dropped Video: ' + escH(s.drops_video) + '</span>';
                 }
                 if (s.drops_ts && s.drops_ts > 0) {
-                  dropsHtml += '<span class="badge me-1 mb-1" style="background:#ff0000;color:#fff;">Dropped TS: ' + s.drops_ts + '</span>';
+                  dropsHtml += '<span class="badge me-1 mb-1" style="background:#ff0000;color:#fff;">Dropped TS: ' + escH(s.drops_ts) + '</span>';
                 }
                 let html = dropsHtml;
                 for (let j = 0; j < links.length; ++j) {
@@ -4029,7 +4048,7 @@ async function repoll(){
                   const fg = '#000'; // readable on light green / light blue / orange
                   const owd = (l.owdR!=null? l.owdR : '–');
                   const loss = (l.rx_percent_lost!=null? l.rx_percent_lost+'%' : '–');
-                  html += '<span class="badge me-1 mb-1 badge-link" style="background:' + bg + '; color:' + fg + ';">' + l.name + ': ' + rb + ' kb/s • OWD ' + owd + ' ms • loss ' + loss + '</span>';
+                  html += '<span class="badge me-1 mb-1 badge-link" style="background:' + bg + '; color:' + fg + ';">' + escH(l.name) + ': ' + rb + ' kb/s • OWD ' + escH(owd) + ' ms • loss ' + escH(loss) + '</span>';
                 }
                 linkBadges.innerHTML = html || '<span class="text-muted">No links</span>';
                 updateCursor(i);
@@ -4089,6 +4108,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def log_purge(self, **kwargs):
         with connect_db() as c:
             c.execute("DELETE FROM live_sample")
@@ -4098,6 +4118,7 @@ async function repoll(){
     
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def log_stop(self, session_id=None):
         from datetime import datetime
         if not session_id:
@@ -4116,6 +4137,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def log_delete(self, session_id=None):
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
@@ -4131,6 +4153,7 @@ async function repoll(){
         
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def log_rename(self, session_id=None, title=""):
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
@@ -4637,6 +4660,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_geoip_save(self, ip=None, lat=None, lng=None, label=None):
         def _s(v): return (v[-1] if isinstance(v, list) else (v or '')).strip()
         ip = _s(ip); lat = _s(lat); lng = _s(lng); label = _s(label)
@@ -4657,6 +4681,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_geoip_delete(self, ip=None):
         if ip:
             with connect_db() as c:
@@ -4686,6 +4711,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_report_create(self, host=None, route_id=None, route_name=None,
                                name=None, started_at=None, ended_at=None,
                                tz_offset=None):
@@ -4761,6 +4787,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def gateway_report_delete(self, report_id=None, host=None, route_id=None):
         """Delete a report session."""
         if report_id:
@@ -5438,7 +5465,7 @@ async function repoll(){
                 </div>
                 <div class="mt-3 d-flex gap-2">
                   <button class="btn btn-primary" type="submit">Save</button>
-                  <a class="btn btn-outline-secondary" href="/settings_slack_test">Send test notification</a>
+                  <button class="btn btn-outline-secondary" type="submit" formmethod="post" formaction="/settings_slack_test" formnovalidate>Send test notification</button>
                 </div>
               </form>
             </div>
@@ -5453,6 +5480,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_slack_save(self, webhook_url='', channel='#streampilot', username='StreamPilot'):
         with connect_db() as c:
             c.execute("UPDATE slack_config SET webhook_url=?,channel=?,username=? WHERE id=1",
@@ -5461,7 +5489,8 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
-    def settings_slack_test(self):
+    @cherrypy.tools.allow(methods=['POST'])
+    def settings_slack_test(self, **kwargs):
         cfg = POLLER._load_slack_cfg() if POLLER else None
         if not cfg:
             raise cherrypy.HTTPRedirect("/settings?msg=No+webhook+configured")
@@ -5470,6 +5499,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_device_save(self, device_id=None, notify_session=None, notify_drops=None,
                               notify_owd_threshold='0', notify_bitrate_min='0',
                               notify_poller_error=None, notify_logs=None,
@@ -5500,6 +5530,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_device_pause(self, device_id=None):
         if not device_id: raise cherrypy.HTTPRedirect("/settings")
         try: did = int(device_id)
@@ -5511,6 +5542,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_device_resume(self, device_id=None):
         if not device_id: raise cherrypy.HTTPRedirect("/settings")
         try: did = int(device_id)
@@ -5523,6 +5555,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_gw_save(self, gw_id=None, notify_source=None, notify_client=None,
                           thr_bitrate_min='0', thr_loss_max='0', thr_lost_max='0',
                           thr_dropped_max='0', thr_retransmit_max='0'):
@@ -5546,6 +5579,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_gw_pause(self, gw_id=None):
         if not gw_id: raise cherrypy.HTTPRedirect("/settings")
         try: gid = int(gw_id)
@@ -5557,6 +5591,7 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
+    @cherrypy.tools.allow(methods=['POST'])
     def settings_gw_resume(self, gw_id=None):
         if not gw_id: raise cherrypy.HTTPRedirect("/settings")
         try: gid = int(gw_id)
@@ -5567,12 +5602,54 @@ async function repoll(){
         raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+resumed")
 
 
+def _host_key(netloc, scheme=None):
+    """Lower-cased host[:port] with the scheme's default port removed."""
+    h = (netloc or '').strip().lower()
+    for sch, suffix in (('http', ':80'), ('https', ':443')):
+        if scheme in (None, sch) and h.endswith(suffix):
+            h = h[:-len(suffix)]
+    return h
+
+
+def _same_origin_check():
+    """Reject cross-site POSTs (CSRF): Origin (or Referer) must match our own host."""
+    req = cherrypy.request
+    if (req.method or '').upper() != 'POST':
+        return
+    src = req.headers.get('Origin') or req.headers.get('Referer')
+    if not src:
+        return
+    own = ''
+    if (os.getenv("SP_MODE") or "http").strip().lower() == "proxy":
+        own = (req.headers.get('X-Forwarded-Host') or '').split(',')[0]
+    own = own.strip() or req.headers.get('Host') or ''
+    try:
+        parts = urlsplit(src.strip())
+        theirs = _host_key(parts.netloc, parts.scheme.lower())
+    except Exception:
+        theirs = ''
+    if not theirs or theirs != _host_key(own, parts.scheme.lower() if theirs else None):
+        cherrypy.log(f'[csrf] rejected cross-origin POST to {req.path_info} from {src!r}')
+        raise cherrypy.HTTPError(403, 'Cross-origin request rejected')
+
+
+def _session_samesite():
+    """Add SameSite=Lax to the session cookie (not supported natively by this CherryPy)."""
+    try:
+        name = cherrypy.request.config.get('tools.sessions.name', 'session_id')
+        cookie = cherrypy.response.cookie
+        if name in cookie:
+            cookie[name]['samesite'] = 'Lax'
+    except Exception:
+        pass
+
+
 def run():
     _init_db()  # create tables/indexes once at startup
-    # Attach CORS headers to every response (including 3xx redirects)
-    def _cors():
-        cherrypy.response.headers['Access-Control-Allow-Origin'] = '*'
-    cherrypy.tools.cors = cherrypy.Tool('before_finalize', _cors, priority=60)
+    # CSRF defences applied to every request: same-origin check on POST,
+    # and SameSite=Lax on the session cookie (including 3xx redirects)
+    cherrypy.tools.same_origin = cherrypy.Tool('on_start_resource', _same_origin_check, priority=20)
+    cherrypy.tools.session_samesite = cherrypy.Tool('before_finalize', _session_samesite, priority=60)
 
     port = int(os.getenv("SP_PORT", "5555"))
     mode = (os.getenv("SP_MODE") or "http").strip().lower()
@@ -5588,11 +5665,8 @@ def run():
     cfg = {
         "server.socket_port": port,
         "server.socket_host": "0.0.0.0",
-        "tools.response_headers.on": True,
-        "tools.response_headers.headers": [
-            ("Access-Control-Allow-Origin", "*"),
-        ],
-        "tools.cors.on": True,
+        "tools.same_origin.on": True,
+        "tools.session_samesite.on": True,
         "server.thread_pool": 32,
         "server.socket_timeout": 5,
         "tools.sessions.on": True,

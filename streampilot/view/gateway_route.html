@@ -187,7 +187,8 @@ document.querySelectorAll('#mainTabs button').forEach(function(btn){
 });
 
 // ── Format helpers ────────────────────────────────────────────────────────
-function f(v,unit,dec){
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+  function f(v,unit,dec){
   if(v==null||v===''||isNaN(parseFloat(v))) return '—';
   return parseFloat(v).toFixed(dec!=null?dec:2)+(unit||'');
 }
@@ -199,7 +200,7 @@ function colorBadge(v,ok,warn){
 }
 function stBadge(state){
   var ok=(state||'').indexOf('connect')>=0||(state||'').indexOf('ok')>=0;
-  return '<span class="badge '+(ok?'text-bg-success':'text-bg-secondary')+'">'+(state||'—')+'</span>';
+  return '<span class="badge '+(ok?'text-bg-success':'text-bg-secondary')+'">'+esc(state||'—')+'</span>';
 }
 function tr(label,val){
   return '<tr><td class="text-muted small pe-3 text-nowrap" style="width:50%">'+label+'</td>'
@@ -345,16 +346,16 @@ function buildDestsHTML(dsts){
     var clients = extractClients(dst);
     var stateStr = dst.state||dst.summaryStatusDetails||'';
     var stCls = stateStr.indexOf('connect')>=0?'text-bg-success':'text-bg-secondary';
-    var modeBadge = '<span class="badge text-bg-info me-1">'+(dst.mode||'').toUpperCase()+'</span>';
+    var modeBadge = '<span class="badge text-bg-info me-1">'+esc((dst.mode||'').toUpperCase())+'</span>';
     var cfgRows=[
-      ['Protocol',(dst.protocol||'srt').toUpperCase()+' · '+(dst.mode||'')],
-      ['Address',  dst.address+':'+dst.port],
+      ['Protocol',esc((dst.protocol||'srt').toUpperCase()+' · '+(dst.mode||''))],
+      ['Address',  esc(dst.address+':'+dst.port)],
       ['State',    stBadge(stateStr)],
-      ['Elapsed',  dst.elapsedRunningTime||'—'],
+      ['Elapsed',  esc(dst.elapsedRunningTime||'—')],
       ['Latency',  f(dst.srtNegotiatedLatency,' ms',0)||f(dst.srtLatency,' ms',0)],
-      ['Enc.',     dst.srtEncryption||'none'],
-      ['Limit',    dst.srtConnectionLimit!=null?dst.srtConnectionLimit:'—'],
-      ['Rejected', dst.srtRejectedCount!=null?dst.srtRejectedCount:'—'],
+      ['Enc.',     esc(dst.srtEncryption||'none')],
+      ['Limit',    esc(dst.srtConnectionLimit!=null?dst.srtConnectionLimit:'—')],
+      ['Rejected', esc(dst.srtRejectedCount!=null?dst.srtRejectedCount:'—')],
     ];
     var stRows=[
       ['Bitrate',    f(dst.bitrate,' Mb/s')],
@@ -367,9 +368,9 @@ function buildDestsHTML(dsts){
       var key=di+'_'+ci;
       return '<div class="border rounded p-2 mb-2" id="cl_'+key+'">'
         +'<div class="d-flex flex-wrap gap-2 align-items-center mb-2">'
-        +'<span class="fw-semibold small">'+(cl.label||'Client '+ci)+'</span>'
-        +'<code class="small">'+cl.address+':'+cl.port+'</code>'
-        +(cl.srtVersion?'<span class="text-muted small">SRT '+cl.srtVersion+' / peer '+cl.peerVersion+'</span>':'')
+        +'<span class="fw-semibold small">'+esc(cl.label||'Client '+ci)+'</span>'
+        +'<code class="small">'+esc(cl.address+':'+cl.port)+'</code>'
+        +(cl.srtVersion?'<span class="text-muted small">SRT '+esc(cl.srtVersion)+' / peer '+esc(cl.peerVersion)+'</span>':'')
         +'<span class="ms-auto small text-muted" id="cl_br_'+key+'">'+f(cl.bitrate,' Mb/s')+'</span>'
         +'</div>'
         +'<div class="table-responsive mb-2">'
@@ -389,9 +390,9 @@ function buildDestsHTML(dsts){
       +'<h2 class="accordion-header">'
       +'<button class="accordion-button'+(di>0?' collapsed':'')
       +'" data-bs-toggle="collapse" data-bs-target="#dp'+di+'">'
-      +'<span class="fw-semibold me-2">'+(dst.name||'Dest '+di)+'</span>'
+      +'<span class="fw-semibold me-2">'+esc(dst.name||'Dest '+di)+'</span>'
       +modeBadge
-      +'<span class="badge '+stCls+' me-1">'+(stateStr||'—')+'</span>'
+      +'<span class="badge '+stCls+' me-1">'+esc(stateStr||'—')+'</span>'
       +'<span class="badge text-bg-secondary" id="dst_clients_'+di+'">'+clients.length+' client(s)</span>'
       +'</button></h2>'
       +'<div id="dp'+di+'" class="accordion-collapse collapse'+(di===0?' show':'')+'">'
@@ -430,7 +431,7 @@ function updateClientRows(dsts){
         +'<td>'+f(cl.lostPkts,'',0)+'</td>'
         +'<td>'+f(cl.dropped,'',0)+'</td>'
         +'<td>'+f(cl.retransmit,' b/s',0)+'</td>'
-        +'<td><span class="badge text-bg-secondary small">'+(cl.enc||'none')+'</span></td>'
+        +'<td><span class="badge text-bg-secondary small">'+esc(cl.enc||'none')+'</span></td>'
         +'</tr>';
       // Chart
       ensureClientChart(key);
@@ -477,7 +478,7 @@ function mark(key,lat,lng,color,title,popup,radius){
   if(!mapObj) return;
   if(mapMarkers[key]){mapMarkers[key].setLatLng([lat,lng]).setStyle({color:color,fillColor:color});return;}
   mapMarkers[key]=L.circleMarker([lat,lng],{radius:radius||8,color:color,fillColor:color,fillOpacity:0.85})
-    .addTo(mapObj).bindPopup('<b>'+title+'</b><br>'+popup);
+    .addTo(mapObj).bindPopup('<b>'+esc(title)+'</b><br>'+popup);
 }
 function line(key,lat1,lng1,lat2,lng2,color){
   if(!mapObj) return;
@@ -525,15 +526,15 @@ function doUpdateMap(data){
   // Debug bar
   var dbgEl=document.getElementById('mapDbg');
   if(dbgEl) dbgEl.innerHTML=
-    '📍 Src: '+(srcIp||'<span style="color:#aaa">—</span>')+'<br>'+
-    '👥 Clients: '+(allClients.map(function(c){return c.ip;}).filter(Boolean).join('<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')||'<span style="color:#aaa">none</span>')+'<br>'+
+    '📍 Src: '+(srcIp?esc(srcIp):'<span style="color:#aaa">—</span>')+'<br>'+
+    '👥 Clients: '+(allClients.map(function(c){return c.ip;}).filter(Boolean).map(esc).join('<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')||'<span style="color:#aaa">none</span>')+'<br>'+
     '<a href="/gateway_geoip" style="color:#7cf;font-size:9px">✏ edit coordinates</a>';
 
   // Source marker
   if(srcIp) geo(srcIp,function(g){
     if(!g) return;
     mark('src',g.lat,g.lng,RCOLOR,src.name||srcIp,
-      srcIp+'<br>'+(src.name||'')+'<br>'+(g.label||''),10);
+      esc(srcIp)+'<br>'+esc(src.name||'')+'<br>'+esc(g.label||''),10);
   });
 
   // Client markers + fuchsia lines
@@ -543,13 +544,13 @@ function doUpdateMap(data){
       geo(ip,function(gc){
         if(!gc) return;
         mark(key,gc.lat,gc.lng,RCOLOR,label||ip,
-          ip+(port?':'+port:'')+'<br>'+(gc.label||''));
+          esc(ip+(port?':'+port:''))+'<br>'+esc(gc.label||''));
         if(!srcIp) return;
         geo(srcIp,function(gs){
           if(!gs) return;
           var dist=haversine(gs.lat,gs.lng,gc.lat,gc.lng);
           var brVal=br!=null?br:(brTotal!=null?brTotal:null);
-          var popup='<b>'+(label||ip)+'</b><br>'
+          var popup='<b>'+esc(label||ip)+'</b><br>'
             +(brVal!=null?'Bitrate: '+brVal.toFixed(2)+' Mb/s<br>':'')
             +(rtt!=null?'RTT: '+rtt.toFixed(1)+' ms<br>':'')
             +(loss!=null?'Loss: '+loss.toFixed(2)+'%<br>':'')
@@ -578,13 +579,13 @@ function updateSource(rstat, rcfg){
   var src=rstat.source||{};
   var scfg=rcfg.source||{};
   document.getElementById('srcConfig').innerHTML=[
-    ['Name',    scfg.name||src.name||'—'],
-    ['Protocol',(scfg.protocol||src.protocol||'srt').toUpperCase()],
-    ['Mode',    scfg.mode||src.mode||'—'],
-    ['Address', (scfg.address||'—')+':'+(scfg.port||'—')],
-    ['SRT version', src.srt_version||'—'],
+    ['Name',    esc(scfg.name||src.name||'—')],
+    ['Protocol',esc((scfg.protocol||src.protocol||'srt').toUpperCase())],
+    ['Mode',    esc(scfg.mode||src.mode||'—')],
+    ['Address', esc((scfg.address||'—')+':'+(scfg.port||'—'))],
+    ['SRT version', esc(src.srt_version||'—')],
     ['State',   stBadge(src.state)],
-    ['Elapsed', src.elapsedRunningTime||'—'],
+    ['Elapsed', esc(src.elapsedRunningTime||'—')],
   ].map(function(r){return tr(r[0],r[1]);}).join('');
 
   document.getElementById('srcStats').innerHTML=[
@@ -601,7 +602,7 @@ function updateSource(rstat, rcfg){
     ['Buffer',     f(src.srtBufferLevel,' ms',0)],
     ['Latency neg.',f(src.srtNegotiatedLatency,' ms',0)],
     ['Latency cfg.',f(src.srtLatency,' ms',0)],
-    ['Encryption', src.srtEncryption||src.srtCryptoMode||'—'],
+    ['Encryption', esc(src.srtEncryption||src.srtCryptoMode||'—')],
     ['Lost pkts',  f(src.srtNumLostPackages||src.srtNumLostPackets,'',0)],
     ['Retransmit', f(src.srtRetransmitRate,' b/s',0)],
     ['Unrecovered',f(src.srtUnrecoveredPackets,'',0)],
@@ -611,9 +612,9 @@ function updateSource(rstat, rcfg){
   document.getElementById('srcConnsTbody').innerHTML=srcConns.length
     ? srcConns.map(function(c){
         return '<tr>'
-          +'<td class="font-monospace small">'+c.address+'</td><td>'+c.port+'</td>'
+          +'<td class="font-monospace small">'+esc(c.address)+'</td><td>'+esc(c.port)+'</td>'
           +'<td>'+stBadge(c.state)+'</td>'
-          +'<td><span class="badge text-bg-light text-dark small">'+(c.srtVersion||'—')+'</span></td>'
+          +'<td><span class="badge text-bg-light text-dark small">'+esc(c.srtVersion||'—')+'</span></td>'
           +'<td>'+f(c.srtCurrentBandwidth,' Mb/s')+'</td>'
           +'<td>'+f(c.srtEstimatedBandwidth,' Mb/s')+'</td>'
           +'<td>'+colorBadge(c.srtRoundTripTime,50,200)+'</td>'
@@ -623,7 +624,7 @@ function updateSource(rstat, rcfg){
           +'<td>'+f(c.srtNumLostPackets,'',0)+'</td>'
           +'<td>'+f(c.srtDroppedPackets,'',0)+'</td>'
           +'<td>'+f(c.srtRetransmitRate,' b/s',0)+'</td>'
-          +'<td><span class="badge text-bg-secondary small">'+(c.srtEncryption||'none')+'</span></td>'
+          +'<td><span class="badge text-bg-secondary small">'+esc(c.srtEncryption||'none')+'</span></td>'
           +'</tr>';
       }).join('')
     : '<tr><td colspan="14" class="text-muted text-center">No active connections</td></tr>';
@@ -724,10 +725,10 @@ function pollEvents(){
       tbody.innerHTML=evs.map(function(e){
         var t=e.type||'';
         var badge=t.indexOf('started')>=0||t.indexOf('connected')>=0
-          ?'<span class="badge text-bg-success">'+t+'</span>'
+          ?'<span class="badge text-bg-success">'+esc(t)+'</span>'
           :t.indexOf('stopped')>=0||t.indexOf('disconnected')>=0
-          ?'<span class="badge text-bg-danger">'+t+'</span>'
-          :'<span class="badge text-bg-secondary">'+t+'</span>';
+          ?'<span class="badge text-bg-danger">'+esc(t)+'</span>'
+          :'<span class="badge text-bg-secondary">'+esc(t)+'</span>';
         var rts=e.ts||'',dp='';
         if(rts.length>=10){var dp0=rts.slice(0,10).split('-');dp=dp0[2]+'/'+dp0[1]+'/'+dp0[0];}
         // Local time from UTC
@@ -740,11 +741,11 @@ function pollEvents(){
         }
         return '<tr>'
           +'<td class="text-muted small">'+localStr+'</td>'
-          +'<td class="text-muted small">'+dp+'</td>'
-          +'<td class="text-muted small">'+rts.slice(11,19)+'</td>'
+          +'<td class="text-muted small">'+esc(dp)+'</td>'
+          +'<td class="text-muted small">'+esc(rts.slice(11,19))+'</td>'
           +'<td>'+badge+'</td>'
-          +'<td class="small text-muted">'+(e.detail||'')+'</td>'
-          +'<td>'+(e.ip?'<code class="small">'+e.ip+'</code>':'<span class="text-muted">—</span>')+'</td></tr>';
+          +'<td class="small text-muted">'+esc(e.detail||'')+'</td>'
+          +'<td>'+(e.ip?'<code class="small">'+esc(e.ip)+'</code>':'<span class="text-muted">—</span>')+'</td></tr>';
       }).join('');
     }).catch(function(){});
 }
@@ -783,19 +784,19 @@ function loadReports(){
       }
       tbody.innerHTML=d.reports.map(function(r){
         return '<tr>'
-          +'<td class="fw-semibold">'+r.name+'</td>'
-          +'<td class="small text-muted">'+r.started_at+'</td>'
-          +'<td class="small text-muted">'+r.ended_at+'</td>'
-          +'<td class="small text-muted">'+r.created_at+'</td>'
-          +'<td><span class="badge text-bg-secondary">'+r.sample_count+'</span></td>'
-          +'<td><span class="badge text-bg-secondary">'+r.event_count+'</span></td>'
+          +'<td class="fw-semibold">'+esc(r.name)+'</td>'
+          +'<td class="small text-muted">'+esc(r.started_at)+'</td>'
+          +'<td class="small text-muted">'+esc(r.ended_at)+'</td>'
+          +'<td class="small text-muted">'+esc(r.created_at)+'</td>'
+          +'<td><span class="badge text-bg-secondary">'+esc(r.sample_count)+'</span></td>'
+          +'<td><span class="badge text-bg-secondary">'+esc(r.event_count)+'</span></td>'
           +'<td>'
-          +'<a class="btn btn-sm btn-outline-dark me-1" href="/gateway_report_pdf?report_id='+r.id+'&tz_offset='+new Date().getTimezoneOffset()+'" target="_blank">PDF</a>'
+          +'<a class="btn btn-sm btn-outline-dark me-1" href="/gateway_report_pdf?report_id='+encodeURIComponent(r.id)+'&tz_offset='+new Date().getTimezoneOffset()+'" target="_blank">PDF</a>'
           +'<form method="post" action="/gateway_report_delete" class="d-inline"'
           +' onsubmit="return confirm(\'Delete this report?\')">'
-          +'<input type="hidden" name="report_id" value="'+r.id+'">'
-          +'<input type="hidden" name="host" value="'+HOST+'">'
-          +'<input type="hidden" name="route_id" value="'+ROUTE_ID+'">'
+          +'<input type="hidden" name="report_id" value="'+esc(r.id)+'">'
+          +'<input type="hidden" name="host" value="'+esc(HOST)+'">'
+          +'<input type="hidden" name="route_id" value="'+esc(ROUTE_ID)+'">'
           +'<button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>'
           +'</form></td>'
           +'</tr>';

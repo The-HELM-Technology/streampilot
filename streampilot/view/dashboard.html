@@ -106,7 +106,7 @@ Copyright (C) 2026 Alexandre Licinio
     function badge(cls, text){ return '<span class="badge bg-'+cls+' me-1"><small>'+text+'</small></span>'; }
     
     
-    function safe(v){ return (v===null||v===undefined) ? '' : String(v); }
+    function safe(v){ return (v===null||v===undefined) ? '' : String(v).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
     function idSafe(s){ return String(s==null?'':s).replace(/[^A-Za-z0-9_-]/g,'_'); }
     
     // Color palette for up to 16 concurrent inputs (stable per device/input)
@@ -258,7 +258,7 @@ Copyright (C) 2026 Alexandre Licinio
                                                                                                                             html += '<div class="row g-3 align-items-start pt-1 pb-4 border-top">';
                                                                                                                             html += '<div class="col-md-4">';
                                                                                                                             if (v.thumbnail) {
-                                                                                                                                html += '<div class="mb-2"><img class="img-thumbnail" style="max-width:100%" src="data:image/jpeg;base64,'+v.thumbnail+'"></div>';
+                                                                                                                                html += '<div class="mb-2"><img class="img-thumbnail" style="max-width:100%" src="data:image/jpeg;base64,'+safe(v.thumbnail)+'"></div>';
                                                                                                                             }
                                                                                                                                 (function(){
                                                                                                                                  const fmt = (v.format!=null ? v.format
@@ -444,7 +444,7 @@ Copyright (C) 2026 Alexandre Licinio
     } else {
       const title = (payload.characteristics && (payload.characteristics.identifier || payload.characteristics.Identifier) || devId) + ' - ' + (v.identifier || ('input '+(parseInt(k,10)+1)));
       const hex = getInputColor(idSafe(devId), idKey);
-      const marker = L.circleMarker(pos, { radius: 7, color: '#000000', weight: 1, fillColor: hex, fillOpacity: 1 }).addTo(s.map).bindTooltip(title);
+      const marker = L.circleMarker(pos, { radius: 7, color: '#000000', weight: 1, fillColor: hex, fillOpacity: 1 }).addTo(s.map).bindTooltip(safe(title));
       s.markers.set(idKey, marker);
     }
 
