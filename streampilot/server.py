@@ -34,6 +34,7 @@ def _get_client_status():
     """Load client/status from environment variables (no YAML)."""
     try:
         client = (os.getenv('CLIENT_NAME') or '').strip() or None
+        status = None  # no source for a status label today
         APP_META["client"] = client
         APP_META["status"] = status
         return client, status
@@ -315,6 +316,19 @@ class BackgroundPoller:
                                     self._notify_alerts(host, did, name or host, payload, _sc2, _ds2)
                             except Exception as _sae:
                                 cherrypy.log(f'[slack] alert: {_sae}')
+                            # Device polled successfully again: clear the "unreachable" flag
+                            if ok:
+                                _st_ok = self.alert_state.setdefault(host, {})
+                                if _st_ok.get('error'):
+                                    _st_ok['error'] = False
+                                    try:
+                                        _sc4 = self._load_slack_cfg()
+                                        if _sc4:
+                                            _ds4 = self._load_device_slack(did)
+                                            if _ds4.get('notify_poller_error') and not _ds4.get('notify_paused'):
+                                                self._slack_post(_sc4[0], f':white_check_mark: *{name or host}* StreamHub reachable again', _sc4[1], _sc4[2], color='good')
+                                    except Exception as _sre:
+                                        cherrypy.log(f'[slack] recovery: {_sre}')
                         except Exception as obs_err:
                             cherrypy.log(f"[poller] observe_payload error: {obs_err}")
                             # Slack poller error
@@ -2345,8 +2359,9 @@ class App:
                 if last_ts:
                     try:
                         from datetime import datetime
+                        # DB timestamps are naive UTC: compare against naive UTC now
                         dt = datetime.fromisoformat(str(last_ts)[:19])
-                        age = max(0, int((datetime.now() - dt).total_seconds()))
+                        age = max(0, int((_dt.now(_tz.utc).replace(tzinfo=None) - dt).total_seconds()))
                     except Exception:
                         age = 'NaN'
                 active = c.execute(
@@ -5228,16 +5243,6 @@ async function repoll(){
             cherrypy.log(f'[gateway_report_pdf] error: {_e}')
             raise cherrypy.HTTPError(500, str(_e))
 
-
-    @require_login
-    @cherrypy.expose
-    def gateway_report_delete(self, report_id=None, host=None, route_id=None):
-        """Delete a report session."""
-        if report_id:
-            with connect_db() as c:
-                c.execute('DELETE FROM srt_report_session WHERE id=?', (report_id,))
-        raise cherrypy.HTTPRedirect(
-            f'/gateway_route?host={host}&route_id={route_id}&tab=tabReports')
 
     @require_login
     @cherrypy.expose

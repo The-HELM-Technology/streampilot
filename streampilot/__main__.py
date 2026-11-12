@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parsed_args = vars(parser.parse_args())
 
     if parsed_args.get('port'):
-        os.environ['StreamPilot'] = parsed_args['port']
+        os.environ['SP_PORT'] = parsed_args['port']
     if parsed_args.get('name'):
         os.environ['CLIENT_NAME'] = parsed_args['name']
     if parsed_args.get('max_streamhubs'):
