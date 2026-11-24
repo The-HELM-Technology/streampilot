@@ -108,8 +108,78 @@ You can also specify port, name, max_streamhubs thru the following environment v
 > - `-mode`: If working behind a Nginx, hosting HTTPS certificates (default: proxy)
 > - `-max_srtgateway`: Maximum number of SRT Gateway devices (default: unlimited)
 > - `-srt_retention_days`: Sample retention in days for SRT Gateway (default: 30)
+> - `-db_url`: Database URL, `sqlite:///path/to/mini.db` or `postgresql://user:pass@host/dbname` (default: `mini.db` next to the package) — see [Database](#database)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
+
+---
+
+## Database
+
+By default StreamPilot stores everything in a local **SQLite** file (`mini.db`, created on first run) — no setup needed.
+For a central, backed-up database you can use **PostgreSQL** instead (tested with PostgreSQL 17).
+
+> **One StreamPilot instance per database.** Each instance polls its StreamHubs / SRT Gateways itself, so two instances
+> pointed at the same database would record every device twice.
+
+### Using PostgreSQL
+
+1. Create an empty database and a role that owns it (StreamPilot creates its tables on first start):
+
+```sql
+CREATE ROLE streampilot LOGIN PASSWORD 'change-me';
+CREATE DATABASE streampilot OWNER streampilot;
+```
+
+2. Install the Postgres driver (not needed for SQLite):
+
+```bash
+bin/python -m pip install "psycopg[binary,pool]"
+```
+
+3. Start StreamPilot with a database URL, either as a flag or through the environment (preferred for the password,
+   which a command-line flag would expose in the process list):
+
+```bash
+export STREAMPILOT_DB_URL='postgresql://streampilot:change-me@db.example.com:5432/streampilot?sslmode=require'
+bin/python -m streampilot -port 5555 -user 'admin' -password 'password'
+# or: bin/python -m streampilot -db_url 'postgresql://…' -port 5555 …
+```
+
+Percent-encode special characters in the password (`@` → `%40`, `/` → `%2F`). The Health page shows which database is in use
+(never the password) and its size.
+
+Connection pool (optional environment variables): `STREAMPILOT_DB_POOL_MIN` (default 2), `STREAMPILOT_DB_POOL_MAX`
+(default 20), `STREAMPILOT_DB_POOL_TIMEOUT` seconds to wait for a free connection (default 30).
+
+### Moving an existing `mini.db` to PostgreSQL
+
+1. **Stop StreamPilot** (data written during the copy would be missed).
+2. Create the empty database as above, then run:
+
+```bash
+bin/python -m streampilot.migrate --from mini.db --to 'postgresql://streampilot:change-me@db.example.com/streampilot'
+```
+
+3. Start StreamPilot with `-db_url` / `STREAMPILOT_DB_URL` pointing at it.
+
+The copy runs in a single transaction: if anything fails (or the per-table row counts don't match) nothing is written to
+PostgreSQL. Row ids are kept and sequences are advanced, so new data never collides with migrated data. Your `mini.db` is
+only read — keep it as a backup. The tool refuses a non-empty target; add `--force` to truncate the target tables and
+start over. A few hundred thousand samples take seconds.
+
+### Backups
+
+- **PostgreSQL**: `pg_dump -Fc streampilot > streampilot.dump` (restore with `pg_restore`).
+- **SQLite**: use the online backup command, not a plain file copy, because the database runs in WAL mode:
+  `sqlite3 mini.db ".backup 'mini-backup.db'"`.
+
+### Security
+
+StreamHub API tokens and SRT Gateway passwords are stored **in clear text** in the database (the `devices` and
+`srt_gateway_device` tables), exactly as they are in `mini.db`. With PostgreSQL, give the StreamPilot role access to its own
+database only, restrict network access to the server, and use TLS (`sslmode=require` or stricter) and an encrypted disk
+or backups.
 
 ---
 
@@ -330,6 +400,24 @@ SRT Gateway dashboard — table of all routes with state, bitrate in/out, RTT, l
 ## Contributing
 
 Individuals and companies are welcome to contribute. If you’d like to get involved, feel free to reach out.
+
+### Running the tests
+
+```bash
+bin/python -m pip install CherryPy Mako requests reportlab pytest
+bin/python -m pytest tests                      # SQLite
+```
+
+The suite also runs against PostgreSQL when `STREAMPILOT_TEST_PG_URL` points at a server where it may create and drop
+databases (needs `psycopg`):
+
+```bash
+docker run -d --rm --name streampilot-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:54329:5432 postgres:17-alpine
+STREAMPILOT_TEST_PG_URL=postgresql://postgres:test@127.0.0.1:54329/postgres bin/python -m pytest tests
+```
+
+SQL in the code is written once in SQLite style (`?` placeholders, `INSERT … ON CONFLICT`, `RETURNING id`) and translated
+for PostgreSQL by `streampilot/db.py`; avoid SQLite-only constructs (`INSERT OR …`, `PRAGMA`, `lastrowid`) in new code.
 
 ---
 
