@@ -127,7 +127,7 @@ def test_gateway_readd_keeps_id_and_resets_session(app, client):
     rows = app.query("SELECT id, name, port, protocol, username, password, session_id, gw_device_id "
                      "FROM srt_gateway_device WHERE host=?", (host,))
     assert rows == [(gid, "new", 8443, "http", "u2", "p2", None, None)]
-    client.get(app.base + "/gateway_delete_device", params={"id": gid}, allow_redirects=False)
+    client.post(app.base + "/gateway_delete_device", data={"id": gid}, allow_redirects=False)
 
 
 def test_import_returns_fresh_ids_each_time(app, client, imported_session):

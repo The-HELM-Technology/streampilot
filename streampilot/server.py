@@ -5195,16 +5195,6 @@ async function repoll(){
 
     @require_login
     @cherrypy.expose
-    def gateway_report_delete(self, report_id=None, host=None, route_id=None):
-        """Delete a report session."""
-        if report_id:
-            with connect_db() as c:
-                c.execute('DELETE FROM srt_report_session WHERE id=?', (report_id,))
-        raise cherrypy.HTTPRedirect(
-            f'/gateway_route?host={host}&route_id={route_id}&tab=tabReports')
-
-    @require_login
-    @cherrypy.expose
     def gateway_slack_status(self, host=None):
         import json as _j
         cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
