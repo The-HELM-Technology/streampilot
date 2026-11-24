@@ -12,7 +12,7 @@ import base64, hashlib as _hl
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     
 import json, html as _html
-import os, time, sqlite3, cherrypy
+import os, time, cherrypy
 import hashlib, secrets, functools
 import threading
 import random
@@ -21,13 +21,16 @@ from typing import Optional
 from mako.lookup import TemplateLookup
 from collect.scripts.streamhub import fetch_streamhub
 try:
-    from .logger import LiveLogger  # cas package
+    from . import db as _dbm         # cas package
+    from .logger import LiveLogger
 except Exception:
-    from logger import LiveLogger    # cas script direct
+    import db as _dbm                # cas script direct
+    from logger import LiveLogger
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT = BASE_DIR.parent  # project root
 DB_PATH = ROOT / "mini.db"
+_dbm.configure(DB_PATH)
 APP_META = {"client": None, "status": None}
 
 def _get_client_status():
@@ -529,12 +532,7 @@ def _persist_output_map(host: str, payload: dict):
 def _init_db():
     """Run once at startup — creates tables, indexes, runs migrations."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-20000;")
+    conn = _dbm.connect(timeout=10.0, busy_ms=5000)
     # Schéma minimal (tel que déjà en place chez toi)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS devices ("
@@ -717,81 +715,21 @@ def _init_db():
             name        TEXT,
             started_at  TEXT NOT NULL,
             ended_at    TEXT NOT NULL,
-            created_at  TEXT
+            created_at  TEXT,
+            tz_offset   INTEGER DEFAULT 0
         )""")
+    # Migrations for existing DBs
+    if not _dbm.column_exists(conn, 'srt_report_session', 'tz_offset'):
+        conn.execute('ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0')
+    if not _dbm.column_exists(conn, 'srt_connection_sample', 'srt_version'):
+        conn.execute('ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT')
     conn.commit()
     conn.close()
 
 
 def connect_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=2000;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-20000;")
-    # Ensure critical tables always exist (idempotent, fast after first run)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS devices ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " name TEXT, protocol TEXT, host TEXT, port INTEGER, api_path TEXT, token TEXT)"
-    )
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS device_output_map (
-            device_host  TEXT NOT NULL,
-            input_index  INTEGER NOT NULL,
-            output_name  TEXT NOT NULL,
-            PRIMARY KEY (device_host, output_name)
-        )""")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS srt_report_session (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            route_id    TEXT NOT NULL,
-            route_name  TEXT,
-            name        TEXT,
-            started_at  TEXT NOT NULL,
-            ended_at    TEXT NOT NULL,
-            created_at  TEXT,
-            tz_offset   INTEGER DEFAULT 0
-        )""")
-    # Migration: add tz_offset if missing (existing DBs)
-    try:
-        conn.execute('ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0')
-    except Exception: pass
-    try:
-        conn.execute('ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT')
-    except Exception: pass
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS streamhub_log (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            ts      TEXT,
-            node    TEXT,
-            level   TEXT,
-            message TEXT,
-            raw     TEXT,
-            fp      TEXT
-        )""")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS device_slack ("
-        "device_id INTEGER PRIMARY KEY,"
-        "notify_session INTEGER DEFAULT 1,"
-        "notify_drops INTEGER DEFAULT 1,"
-        "notify_owd_threshold INTEGER DEFAULT 0,"
-        "notify_bitrate_min INTEGER DEFAULT 0,"
-        "notify_poller_error INTEGER DEFAULT 1,"
-        "notify_logs INTEGER DEFAULT 1,"
-        "notify_connection INTEGER DEFAULT 1,"
-        "notify_paused INTEGER DEFAULT 0,"
-        "ignore_contains TEXT DEFAULT '[]')"
-    )
-    try:
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shlog_fp ON streamhub_log(fp)")
-    except Exception: pass
-    _ensure_db_indexes(conn)
-    return conn
+    """Open a DB connection (see db.py). Schema is created once by _init_db()."""
+    return _dbm.connect(timeout=5.0, busy_ms=2000)
 
 def _persist_logs(host: str, entries: list):
     if not entries:
@@ -2227,7 +2165,7 @@ class App:
         - Creates a new live_session row (new ID).
         - Inserts all per-tick samples; expands links[] into individual rows.
         """
-        import json, sqlite3
+        import json
         # GET -> simple upload form
         if cherrypy.request.method.upper() != 'POST':
             return ("""
@@ -2314,7 +2252,6 @@ class App:
 
     @cherrypy.expose
     def metrics(self):
-        import sqlite3
         lines = []
         # Poller metrics
         running = 1 if (POLLER and getattr(POLLER, '_thr', None) and POLLER._thr.is_alive()) else 0
@@ -2369,7 +2306,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def health(self):
-        import sqlite3, html
+        import html
         now = time.time()
         # Poller status
         running = False
@@ -2612,7 +2549,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def health_json(self):
-        import sqlite3, json
+        import json
         now = time.time()
         running = bool(POLLER and getattr(POLLER, '_thr', None) and POLLER._thr.is_alive())
         interval = getattr(POLLER, 'interval', None) if POLLER else None
@@ -2782,7 +2719,7 @@ class App:
     @slow(0.25)
     def logs(self):
         cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
-        import sqlite3, json
+        import json
         with connect_db() as c:
             # Ensure 'title' column exists (migration-safe)
             cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
@@ -2814,7 +2751,7 @@ class App:
             tz_min = int(tz_offset) if tz_offset is not None else None
         except Exception:
             tz_min = None
-        import sqlite3, json
+        import json
         from datetime import datetime as _dtl, timedelta as _tdl
         def _to_local(iso_str):
             if not iso_str or tz_min is None:
@@ -2913,7 +2850,7 @@ class App:
     @cherrypy.expose
     def logs_ui(self, msg=None):
         # Simple HTML page to list sessions and offer downloads/purge
-        import sqlite3, html
+        import html
         with connect_db() as c:
             # Ensure 'title' column exists (migration-safe)
             cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
@@ -3120,7 +3057,7 @@ class App:
     @require_login
     @cherrypy.expose
     def log_download_csv(self, session_id=None, tz_offset=None):
-        import sqlite3, csv, io, json
+        import csv, io, json
         from datetime import datetime as _dtc, timedelta as _tdc
         cherrypy.response.headers["Content-Type"] = "text/csv; charset=utf-8"
         if not session_id:
@@ -3168,7 +3105,7 @@ class App:
     @require_login
     @cherrypy.expose
     def log_download_geojson(self, session_id=None, tz_offset=None):
-        import sqlite3, json
+        import json
         from datetime import datetime as _dtg, timedelta as _tdg
         cherrypy.response.headers["Content-Type"] = "application/geo+json; charset=utf-8"
         if not session_id:
@@ -3337,7 +3274,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def log_view(self, session_id=None):
-        import sqlite3, html, json
+        import html, json
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
@@ -4150,7 +4087,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_purge(self, **kwargs):
-        import sqlite3
         with connect_db() as c:
             c.execute("DELETE FROM live_sample")
             c.execute("DELETE FROM live_session")
@@ -4160,7 +4096,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_stop(self, session_id=None):
-        import sqlite3
         from datetime import datetime
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
@@ -4179,7 +4114,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_delete(self, session_id=None):
-        import sqlite3
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
@@ -4195,7 +4129,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_rename(self, session_id=None, title=""):
-        import sqlite3
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:

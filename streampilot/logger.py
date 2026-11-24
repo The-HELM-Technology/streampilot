@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Copyright (C) 2026 Alexandre Licinio
-import sqlite3, threading, time, datetime, queue
+import threading, time, datetime, queue
 from typing import Dict, Tuple, Any
+try:
+    from . import db as _db  # package mode
+except ImportError:
+    import db as _db         # script mode
 
 DB_PATH = None  # set at import by server
 TICK_SECONDS = 2
@@ -20,16 +24,7 @@ class LiveLogger:
         self._init_db()
 
     def _conn(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None, timeout=2.0)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout=2000;")
-            conn.execute("PRAGMA temp_store=MEMORY;")
-            conn.execute("PRAGMA cache_size=-20000;")  # ~20MB
-        except Exception:
-            pass
-        return conn
+        return _db.connect(self.db_path, timeout=2.0, busy_ms=2000)
 
     def _init_db(self):
         with self._conn() as c:
