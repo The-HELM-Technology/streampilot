@@ -24,3 +24,7 @@ __pycache__/
 
 # distibution
 dist/
+
+# Local venv / test caches
+.venv/
+.pytest_cache/
