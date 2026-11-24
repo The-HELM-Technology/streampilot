@@ -53,10 +53,41 @@ def test_backend_detection(monkeypatch):
         db.backend()
 
 
-def test_postgres_not_yet_implemented(monkeypatch):
-    monkeypatch.setenv(db.ENV_URL, "postgresql://u:p@h/db")
-    with pytest.raises(NotImplementedError):
+def test_postgres_unreachable_fails_fast(monkeypatch):
+    monkeypatch.setenv(db.ENV_URL, "postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+    monkeypatch.setattr(db, "_pool", None)
+    t0 = time.time()
+    with pytest.raises(Exception):
         db.connect()
+    assert time.time() - t0 < 30
+
+
+# ------------------------------------------------------------------ SQL translation (pure)
+def test_translate_placeholders():
+    assert db.translate("INSERT INTO t(a,b) VALUES(?,?)") == "INSERT INTO t(a,b) VALUES(%s,%s)"
+
+
+def test_translate_leaves_literal_question_marks_and_escapes_percent():
+    assert db.translate("SELECT 1 WHERE a LIKE '%x?%' AND b=?") == "SELECT 1 WHERE a LIKE '%%x?%%' AND b=%s"
+
+
+def test_translate_no_params_does_not_escape_percent():
+    assert db.translate("SELECT '%'", False) == "SELECT '%'"
+
+
+def test_translate_ddl_types():
+    out = db.translate(
+        "CREATE TABLE IF NOT EXISTS x (id INTEGER PRIMARY KEY AUTOINCREMENT, a DATETIME NOT NULL, "
+        "b REAL, c INTEGER DEFAULT 0, d TEXT DEFAULT '[\"INTEGER REAL\"]')", False)
+    assert "id BIGSERIAL PRIMARY KEY" in out
+    assert "a TEXT NOT NULL" in out
+    assert "b DOUBLE PRECISION" in out
+    assert "c BIGINT DEFAULT 0" in out
+    assert "'[\"INTEGER REAL\"]'" in out  # literal untouched
+
+
+def test_translate_does_not_rewrite_types_in_dml():
+    assert db.translate("SELECT CAST(a AS INTEGER) FROM t WHERE b=?") == "SELECT CAST(a AS INTEGER) FROM t WHERE b=%s"
 
 
 def test_with_block_closes_connection(tmp_path):
