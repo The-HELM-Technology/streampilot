@@ -2494,7 +2494,7 @@ class App:
         samples_total = 0
         last_sample_any = None
         try:
-            with connect_db(str(DB_PATH)) as _dbc:
+            with connect_db() as _dbc:
                 sessions_total = _dbc.execute("SELECT COUNT(*) FROM live_session").fetchone()[0] or 0
                 sessions_active = _dbc.execute("SELECT COUNT(*) FROM live_session WHERE ended_at IS NULL").fetchone()[0] or 0
                 samples_total = _dbc.execute("SELECT COUNT(*) FROM live_sample").fetchone()[0] or 0
