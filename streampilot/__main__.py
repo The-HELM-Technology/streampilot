@@ -1,5 +1,4 @@
 import os, argparse
-from .server import *
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -12,6 +11,9 @@ if __name__ == "__main__":
                         help='maximum number of SRT Gateways to monitor (default: unlimited)', required=False)
     parser.add_argument('-srt_retention_days', type=str,
                         help='number of days to keep SRT route samples (default: 30)', required=False)
+    parser.add_argument('-db_url', type=str,
+                        help='database URL, e.g. sqlite:///path/to/mini.db (default: ./mini.db next to the package)',
+                        required=False)
     parser.add_argument('-mode', type=str, choices=['http', 'proxy'],
                         help='http = direct (default) | proxy = behind HTTPS reverse proxy', required=False)
     parsed_args = vars(parser.parse_args())
@@ -32,5 +34,9 @@ if __name__ == "__main__":
         os.environ['SRT_RETENTION_DAYS'] = parsed_args['srt_retention_days']
     if parsed_args.get('mode'):
         os.environ['SP_MODE'] = parsed_args['mode']
+    if parsed_args.get('db_url'):
+        os.environ['STREAMPILOT_DB_URL'] = parsed_args['db_url']
 
+    # Import after the environment is set: server.py opens the database at import time.
+    from .server import run
     os.sys.exit(run())
