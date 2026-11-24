@@ -12,7 +12,7 @@ import base64, hashlib as _hl
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     
 import json, html as _html
-import os, time, sqlite3, cherrypy
+import os, time, cherrypy
 import hashlib, secrets, functools
 import threading
 import random
@@ -21,19 +21,28 @@ from typing import Optional
 from mako.lookup import TemplateLookup
 from collect.scripts.streamhub import fetch_streamhub
 try:
-    from .logger import LiveLogger  # cas package
+    from . import db as _dbm         # cas package
+    from .logger import LiveLogger
 except Exception:
-    from logger import LiveLogger    # cas script direct
+    import db as _dbm                # cas script direct
+    from logger import LiveLogger
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT = BASE_DIR.parent  # project root
 DB_PATH = ROOT / "mini.db"
+_dbm.configure(DB_PATH)
 APP_META = {"client": None, "status": None}
 
 def _get_client_status():
-    """Load client/status from environment variables (no YAML)."""
+    """Load client/status from environment variables (CLIENT_NAME / CLIENT_STATUS).
+
+    `status` is an optional badge next to the client name (e.g. "demo" shows in
+    blue, any other value in green). It used to be read from a YAML file; the
+    variable was left undefined when that was replaced by env vars.
+    """
     try:
         client = (os.getenv('CLIENT_NAME') or '').strip() or None
+        status = (os.getenv('CLIENT_STATUS') or '').strip() or None
         APP_META["client"] = client
         APP_META["status"] = status
         return client, status
@@ -85,7 +94,7 @@ class BackgroundPoller:
                 'notify_bitrate_min,notify_poller_error,notify_logs,notify_connection,notify_paused,ignore_contains'
         try:
             with connect_db() as c:
-                c.execute('INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)', (device_id,))
+                c.execute('INSERT INTO device_slack(device_id) VALUES(?) ON CONFLICT DO NOTHING', (device_id,))
                 r = c.execute(f'SELECT {_COLS} FROM device_slack WHERE device_id=?', (device_id,)).fetchone()
             if r:
                 return dict(zip(_COLS.split(','), r))
@@ -482,7 +491,7 @@ def _filter_logs_for_input(rows, input_index, input_identifier, device_id=None):
 
 def _persist_output_map(host: str, payload: dict):
     """Persist the input→output name mapping from the current payload.
-    Uses INSERT OR REPLACE so historical entries are preserved for past session filtering.
+    Uses an upsert (ON CONFLICT DO UPDATE) so historical entries are preserved for past session filtering.
     ip_outputs keys are 0-indexed in payload; input_index in DB is 1-indexed.
     Only persists outputs that are currently active (status='on').
     """
@@ -515,8 +524,9 @@ def _persist_output_map(host: str, payload: dict):
         if rows:
             with connect_db() as c:
                 c.executemany(
-                    'INSERT OR REPLACE INTO device_output_map(device_host, input_index, output_name) '
-                    'VALUES(?,?,?)',
+                    'INSERT INTO device_output_map(device_host, input_index, output_name) '
+                    'VALUES(?,?,?) '
+                    'ON CONFLICT(device_host, output_name) DO UPDATE SET input_index=excluded.input_index',
                     rows
                 )
     except Exception as _e:
@@ -529,12 +539,7 @@ def _persist_output_map(host: str, payload: dict):
 def _init_db():
     """Run once at startup — creates tables, indexes, runs migrations."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-20000;")
+    conn = _dbm.connect(timeout=10.0, busy_ms=5000)
     # Schéma minimal (tel que déjà en place chez toi)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS devices ("
@@ -648,11 +653,8 @@ def _init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_srt_conn_sample ON srt_connection_sample(device_host, route_id, ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_srt_event ON srt_event(device_host, ts)")
     except Exception: pass
-    try:
-        _ec2 = {r[1] for r in conn.execute("PRAGMA table_info(srt_event)").fetchall()}
-        if "ip_address" not in _ec2:
-            conn.execute("ALTER TABLE srt_event ADD COLUMN ip_address TEXT")
-    except Exception: pass
+    if not _dbm.column_exists(conn, "srt_event", "ip_address"):
+        conn.execute("ALTER TABLE srt_event ADD COLUMN ip_address TEXT")
 
     # Slack global config
     conn.execute("""
@@ -662,7 +664,7 @@ def _init_db():
             channel TEXT DEFAULT '#streampilot',
             username TEXT DEFAULT 'StreamPilot'
         )""")
-    conn.execute("INSERT OR IGNORE INTO slack_config(id) VALUES(1)")
+    conn.execute("INSERT INTO slack_config(id) VALUES(1) ON CONFLICT DO NOTHING")
 
     # Per-device Slack settings
     _DI = ('["StreamHub user admin","StreamHub is disconnected from Aviwest Hub service",'
@@ -683,13 +685,10 @@ def _init_db():
         ")"
     )
     # Migration for existing DBs
-    try:
-        _ec = {r[1] for r in conn.execute("PRAGMA table_info(device_slack)").fetchall()}
-        if "notify_paused" not in _ec:
-            conn.execute("ALTER TABLE device_slack ADD COLUMN notify_paused INTEGER DEFAULT 0")
-        if "notify_connection" not in _ec:
-            conn.execute("ALTER TABLE device_slack ADD COLUMN notify_connection INTEGER DEFAULT 1")
-    except Exception: pass
+    if not _dbm.column_exists(conn, "device_slack", "notify_paused"):
+        conn.execute("ALTER TABLE device_slack ADD COLUMN notify_paused INTEGER DEFAULT 0")
+    if not _dbm.column_exists(conn, "device_slack", "notify_connection"):
+        conn.execute("ALTER TABLE device_slack ADD COLUMN notify_connection INTEGER DEFAULT 1")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS srt_gw_slack (
             gw_id            INTEGER PRIMARY KEY,
@@ -702,48 +701,9 @@ def _init_db():
             thr_dropped_max  INTEGER DEFAULT 0,
             thr_retransmit_max REAL  DEFAULT 0
         )""")
-    try:
-        _gwc = {r[1] for r in conn.execute("PRAGMA table_info(srt_gateway_device)").fetchall()}
-        if "session_id" not in _gwc:
-            conn.execute("ALTER TABLE srt_gateway_device ADD COLUMN session_id TEXT")
-    except Exception: pass
+    if not _dbm.column_exists(conn, "srt_gateway_device", "session_id"):
+        conn.execute("ALTER TABLE srt_gateway_device ADD COLUMN session_id TEXT")
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS srt_report_session (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            route_id    TEXT NOT NULL,
-            route_name  TEXT,
-            name        TEXT,
-            started_at  TEXT NOT NULL,
-            ended_at    TEXT NOT NULL,
-            created_at  TEXT
-        )""")
-    conn.commit()
-    conn.close()
-
-
-def connect_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None, timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=2000;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA cache_size=-20000;")
-    # Ensure critical tables always exist (idempotent, fast after first run)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS devices ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " name TEXT, protocol TEXT, host TEXT, port INTEGER, api_path TEXT, token TEXT)"
-    )
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS device_output_map (
-            device_host  TEXT NOT NULL,
-            input_index  INTEGER NOT NULL,
-            output_name  TEXT NOT NULL,
-            PRIMARY KEY (device_host, output_name)
-        )""")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS srt_report_session (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -756,42 +716,18 @@ def connect_db():
             created_at  TEXT,
             tz_offset   INTEGER DEFAULT 0
         )""")
-    # Migration: add tz_offset if missing (existing DBs)
-    try:
+    # Migrations for existing DBs
+    if not _dbm.column_exists(conn, 'srt_report_session', 'tz_offset'):
         conn.execute('ALTER TABLE srt_report_session ADD COLUMN tz_offset INTEGER DEFAULT 0')
-    except Exception: pass
-    try:
+    if not _dbm.column_exists(conn, 'srt_connection_sample', 'srt_version'):
         conn.execute('ALTER TABLE srt_connection_sample ADD COLUMN srt_version TEXT')
-    except Exception: pass
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS streamhub_log (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_host TEXT NOT NULL,
-            ts      TEXT,
-            node    TEXT,
-            level   TEXT,
-            message TEXT,
-            raw     TEXT,
-            fp      TEXT
-        )""")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS device_slack ("
-        "device_id INTEGER PRIMARY KEY,"
-        "notify_session INTEGER DEFAULT 1,"
-        "notify_drops INTEGER DEFAULT 1,"
-        "notify_owd_threshold INTEGER DEFAULT 0,"
-        "notify_bitrate_min INTEGER DEFAULT 0,"
-        "notify_poller_error INTEGER DEFAULT 1,"
-        "notify_logs INTEGER DEFAULT 1,"
-        "notify_connection INTEGER DEFAULT 1,"
-        "notify_paused INTEGER DEFAULT 0,"
-        "ignore_contains TEXT DEFAULT '[]')"
-    )
-    try:
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_shlog_fp ON streamhub_log(fp)")
-    except Exception: pass
-    _ensure_db_indexes(conn)
-    return conn
+    conn.commit()
+    conn.close()
+
+
+def connect_db():
+    """Open a DB connection (see db.py). Schema is created once by _init_db()."""
+    return _dbm.connect(timeout=5.0, busy_ms=2000)
 
 def _persist_logs(host: str, entries: list):
     if not entries:
@@ -803,8 +739,9 @@ def _persist_logs(host: str, entries: list):
                 continue
             try:
                 c.execute(
-                    "INSERT OR IGNORE INTO streamhub_log"
-                    "(device_host, ts, node, level, message, raw, fp) VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO streamhub_log"
+                    "(device_host, ts, node, level, message, raw, fp) VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO NOTHING",
                     (host, e.get("ts"), e.get("node"), e.get("level"), e.get("message"), e.get("raw"), fp)
                 )
             except Exception:
@@ -814,6 +751,7 @@ def render(tpl, **ctx):
     client, status = _get_client_status()
     ctx.setdefault('client', client)
     ctx.setdefault('status', status)
+    ctx.setdefault('_license_badge_html', _license_badge_html)  # called by base.html inside the status block
     # Provide MAX_STREAMHUB (default 1) and a device_count to all templates
     limit_env = os.getenv('MAX_STREAMHUB')
     try:
@@ -964,17 +902,38 @@ class SRTGatewayPoller:
             time.sleep(sleep)
 
     def _purge_old_samples(self):
-        """Delete srt_route_sample and srt_connection_sample older than SRT_RETENTION_DAYS."""
+        """Housekeeping, run hourly.
+
+        * srt_route_sample, srt_connection_sample and srt_event older than
+          SRT_RETENTION_DAYS (default 30) are deleted.
+        * streamhub_log older than STREAMHUB_LOG_RETENTION_DAYS is deleted. Off by
+          default (0 = keep forever): these logs feed the timeline/PDF of past
+          sessions, and sessions themselves are never expired. Log lines whose
+          timestamp could not be parsed (NULL ts) are never purged.
+        """
         try:
             days = int(os.getenv('SRT_RETENTION_DAYS') or 30)
         except Exception:
             days = 30
+        try:
+            log_days = int(os.getenv('STREAMHUB_LOG_RETENTION_DAYS') or 0)
+        except Exception:
+            log_days = 0
         from datetime import datetime as _dtp, timedelta as _tdd
-        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        fmt = '%Y-%m-%d %H:%M:%S'
+        now = _dtp.utcnow()
+        cutoff = (now - _tdd(days=days)).strftime(fmt)
         with connect_db() as c:
-            c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,))
-            c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,))
-        cherrypy.log(f'[srt_gw] purged samples older than {days} days (cutoff {cutoff})')
+            n_route = c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,)).rowcount
+            n_conn = c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,)).rowcount
+            n_evt = c.execute('DELETE FROM srt_event WHERE ts < ?', (cutoff,)).rowcount
+            n_log = 0
+            if log_days > 0:
+                log_cutoff = (now - _tdd(days=log_days)).strftime(fmt)
+                n_log = c.execute('DELETE FROM streamhub_log WHERE ts < ?', (log_cutoff,)).rowcount
+        cherrypy.log(f'[srt_gw] purged older than {days} days (cutoff {cutoff}): '
+                     f'{n_route} route samples, {n_conn} connection samples, {n_evt} events'
+                     + (f'; streamhub logs older than {log_days} days: {n_log}' if log_days > 0 else ''))
 
     def _poll_all(self):
         with connect_db() as c:
@@ -1223,7 +1182,7 @@ class SRTGatewayPoller:
     def _load_gw_slack(self, gw_id: int) -> dict:
         try:
             with connect_db() as c:
-                c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gw_id,))
+                c.execute("INSERT INTO srt_gw_slack(gw_id) VALUES(?) ON CONFLICT DO NOTHING", (gw_id,))
                 r = c.execute("SELECT notify_source,notify_client,notify_paused,"
                               "thr_bitrate_min,thr_loss_max,thr_lost_max,"
                               "thr_dropped_max,thr_retransmit_max "
@@ -1577,9 +1536,12 @@ class App:
                         raise cherrypy.HTTPRedirect(
                             f"/devices?msg=Max+{lgw}+SRT+Gateway(s)+can+be+configured")
                 c.execute(
-                    "INSERT OR REPLACE INTO srt_gateway_device "
+                    "INSERT INTO srt_gateway_device "
                     "(name, host, port, protocol, username, password) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(host) DO UPDATE SET name=excluded.name, port=excluded.port, "
+                    "protocol=excluded.protocol, username=excluded.username, "
+                    "password=excluded.password, gw_device_id=NULL, session_id=NULL",
                     (name or host, host, int(port or 443), protocol, username, password)
                 )
             raise cherrypy.HTTPRedirect("/devices")
@@ -2227,7 +2189,7 @@ class App:
         - Creates a new live_session row (new ID).
         - Inserts all per-tick samples; expands links[] into individual rows.
         """
-        import json, sqlite3
+        import json
         # GET -> simple upload form
         if cherrypy.request.method.upper() != 'POST':
             return ("""
@@ -2254,31 +2216,42 @@ class App:
         except Exception:
             return b"<html><body><p>Invalid JSON</p><a href='/log_import'>Back</a></body></html>"
 
-        sess = (payload or {}).get("session") or {}
-        samples = (payload or {}).get("samples") or []
+        def _invalid(why):
+            cherrypy.response.status = 400
+            return ("<html><body><p>Invalid session file: " + _html.escape(why)
+                    + "</p><a href='/log_import'>Back</a></body></html>").encode('utf-8')
+
+        if not isinstance(payload, dict):
+            return _invalid("expected a JSON object with 'session' and 'samples'")
+        sess = payload.get("session") or {}
+        samples = payload.get("samples") or []
+        if not isinstance(sess, dict) or not isinstance(samples, list):
+            return _invalid("'session' must be an object and 'samples' a list")
+        missing = [k for k in ("device_id", "input_key", "input_index", "started_at") if sess.get(k) in (None, "")]
+        if missing:
+            return _invalid("session is missing " + ", ".join(missing))
 
         with connect_db() as c:
-            # Ensure columns exist (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
-            if 'title' not in cols:
-                c.execute("ALTER TABLE live_session ADD COLUMN title TEXT")
-            cols2 = {r[1] for r in c.execute("PRAGMA table_info(live_sample)").fetchall()}
-            if 'rx_percent_lost' not in cols2:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_percent_lost INTEGER")
-            if 'rx_lost_nb_packets' not in cols2:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_lost_nb_packets INTEGER")
 
             # Insert session (new ID)
             cur = c.execute(
                 "INSERT INTO live_session(device_id, device_host, input_key, input_index, input_identifier, input_display_name, started_at, ended_at, title) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id",
                 (
                     sess.get("device_id"), sess.get("device_host"), sess.get("input_key"), sess.get("input_index"),
                     sess.get("input_identifier"), sess.get("input_display_name"),
                     sess.get("started_at"), sess.get("ended_at"), sess.get("title"),
                 )
             )
-            new_sid = cur.lastrowid
+            row = cur.fetchone()
+            if row is None:  # UNIQUE(device_id, input_key, started_at): this session was imported before
+                from urllib.parse import quote
+                ex = c.execute(
+                    "SELECT id FROM live_session WHERE device_id=? AND input_key=? AND started_at=?",
+                    (sess.get("device_id"), sess.get("input_key"), sess.get("started_at"))).fetchone()
+                raise cherrypy.HTTPRedirect("/logs_ui?msg=" + quote(
+                    f"Session already imported (id {ex[0] if ex else '?'}), nothing changed"))
+            new_sid = row[0]
 
             # Insert samples: expand per-tick links[]
             for s in samples:
@@ -2314,7 +2287,6 @@ class App:
 
     @cherrypy.expose
     def metrics(self):
-        import sqlite3
         lines = []
         # Poller metrics
         running = 1 if (POLLER and getattr(POLLER, '_thr', None) and POLLER._thr.is_alive()) else 0
@@ -2369,7 +2341,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def health(self):
-        import sqlite3, html
+        import html
         now = time.time()
         # Poller status
         running = False
@@ -2473,11 +2445,9 @@ class App:
 
         # --- Database state ---
         import os
-        db_path = str(DB_PATH)
-        try:
-            db_size_bytes = os.path.getsize(db_path)
-        except Exception:
-            db_size_bytes = 0
+        _dbinfo = _dbm.describe()
+        db_path = _dbinfo["location"]
+        db_size_bytes = _dbinfo["size_bytes"]
         def hsize(n):
             try:
                 n = float(n)
@@ -2494,7 +2464,7 @@ class App:
         samples_total = 0
         last_sample_any = None
         try:
-            with connect_db(str(DB_PATH)) as _dbc:
+            with connect_db() as _dbc:
                 sessions_total = _dbc.execute("SELECT COUNT(*) FROM live_session").fetchone()[0] or 0
                 sessions_active = _dbc.execute("SELECT COUNT(*) FROM live_session WHERE ended_at IS NULL").fetchone()[0] or 0
                 samples_total = _dbc.execute("SELECT COUNT(*) FROM live_sample").fetchone()[0] or 0
@@ -2529,7 +2499,7 @@ class App:
             '</div></div>',
             # --- DB state card ---
             '<div class="card mb-3"><div class="card-body">',
-            f'<div class="mb-1"><strong>DB file:</strong> <code>{esc(db_path)}</code></div>',
+            f'<div class="mb-1"><strong>Database ({esc(_dbinfo["kind"])}):</strong> <code>{esc(db_path)}</code></div>',
             f'<div class="mb-1"><strong>Size:</strong> {hsize(db_size_bytes)}</div>',
             '</div></div>',
             '<div class="table-responsive">',
@@ -2612,7 +2582,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def health_json(self):
-        import sqlite3, json
+        import json
         now = time.time()
         running = bool(POLLER and getattr(POLLER, '_thr', None) and POLLER._thr.is_alive())
         interval = getattr(POLLER, 'interval', None) if POLLER else None
@@ -2782,12 +2752,8 @@ class App:
     @slow(0.25)
     def logs(self):
         cherrypy.response.headers["Content-Type"] = "application/json; charset=utf-8"
-        import sqlite3, json
+        import json
         with connect_db() as c:
-            # Ensure 'title' column exists (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
-            if 'title' not in cols:
-                c.execute("ALTER TABLE live_session ADD COLUMN title TEXT")
             rows = c.execute("""
                 SELECT id, device_id, device_host, input_key, input_index,
                        input_identifier, input_display_name, started_at, ended_at, title
@@ -2814,7 +2780,7 @@ class App:
             tz_min = int(tz_offset) if tz_offset is not None else None
         except Exception:
             tz_min = None
-        import sqlite3, json
+        import json
         from datetime import datetime as _dtl, timedelta as _tdl
         def _to_local(iso_str):
             if not iso_str or tz_min is None:
@@ -2825,16 +2791,6 @@ class App:
                 return None
             return (dt - _tdl(minutes=tz_min)).isoformat()
         with connect_db() as c:
-            # Ensure 'title' column exists (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
-            if 'title' not in cols:
-                c.execute("ALTER TABLE live_session ADD COLUMN title TEXT")
-            # Ensure new columns exist (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_sample)").fetchall()}
-            if 'rx_percent_lost' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_percent_lost INTEGER")
-            if 'rx_lost_nb_packets' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_lost_nb_packets INTEGER")
             s = c.execute("SELECT id, device_id, device_host, input_key, input_index, input_identifier, input_display_name, started_at, ended_at, title FROM live_session WHERE id=?", (sid,)).fetchone()
             if not s:
                 return b'{"ok": false, "error":"session_not_found"}'
@@ -2913,12 +2869,8 @@ class App:
     @cherrypy.expose
     def logs_ui(self, msg=None):
         # Simple HTML page to list sessions and offer downloads/purge
-        import sqlite3, html
+        import html
         with connect_db() as c:
-            # Ensure 'title' column exists (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
-            if 'title' not in cols:
-                c.execute("ALTER TABLE live_session ADD COLUMN title TEXT")
             rows = c.execute("""
                 SELECT id, device_id, device_host, input_key, input_index,
                        input_identifier, input_display_name, started_at, ended_at, title
@@ -3120,7 +3072,7 @@ class App:
     @require_login
     @cherrypy.expose
     def log_download_csv(self, session_id=None, tz_offset=None):
-        import sqlite3, csv, io, json
+        import csv, io, json
         from datetime import datetime as _dtc, timedelta as _tdc
         cherrypy.response.headers["Content-Type"] = "text/csv; charset=utf-8"
         if not session_id:
@@ -3134,12 +3086,6 @@ class App:
         except Exception:
             tz_min = None
         with connect_db() as c:
-            # Ensure new columns exist (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_sample)").fetchall()}
-            if 'rx_percent_lost' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_percent_lost INTEGER")
-            if 'rx_lost_nb_packets' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_lost_nb_packets INTEGER")
             rows = c.execute("""
                 SELECT ts, year, month, day, hour, minute, second,
                        latitude, longitude, drops_video, drops_ts,
@@ -3168,7 +3114,7 @@ class App:
     @require_login
     @cherrypy.expose
     def log_download_geojson(self, session_id=None, tz_offset=None):
-        import sqlite3, json
+        import json
         from datetime import datetime as _dtg, timedelta as _tdg
         cherrypy.response.headers["Content-Type"] = "application/geo+json; charset=utf-8"
         if not session_id:
@@ -3191,12 +3137,6 @@ class App:
             return (dt - _tdg(minutes=tz_min)).isoformat()
 
         with connect_db() as c:
-            # Ensure columns exist (migration-safe)
-            cols = {r[1] for r in c.execute("PRAGMA table_info(live_sample)").fetchall()}
-            if 'rx_percent_lost' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_percent_lost INTEGER")
-            if 'rx_lost_nb_packets' not in cols:
-                c.execute("ALTER TABLE live_sample ADD COLUMN rx_lost_nb_packets INTEGER")
 
             s = c.execute(
                 "SELECT id, device_id, device_host, input_key, input_index, input_identifier, input_display_name, started_at, ended_at, title "
@@ -3337,7 +3277,7 @@ class App:
     @cherrypy.expose
     @slow(0.25)
     def log_view(self, session_id=None):
-        import sqlite3, html, json
+        import html, json
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
@@ -4150,7 +4090,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_purge(self, **kwargs):
-        import sqlite3
         with connect_db() as c:
             c.execute("DELETE FROM live_sample")
             c.execute("DELETE FROM live_session")
@@ -4160,7 +4099,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_stop(self, session_id=None):
-        import sqlite3
         from datetime import datetime
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
@@ -4179,7 +4117,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_delete(self, session_id=None):
-        import sqlite3
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
@@ -4195,7 +4132,6 @@ async function repoll(){
     @require_login
     @cherrypy.expose
     def log_rename(self, session_id=None, title=""):
-        import sqlite3
         if not session_id:
             raise cherrypy.HTTPRedirect("/logs_ui?msg=Missing%20session_id")
         try:
@@ -4712,8 +4648,9 @@ async function repoll(){
                 raise cherrypy.HTTPRedirect('/gateway_geoip?msg=Invalid+coordinates')
             with connect_db() as c:
                 c.execute(
-                    'INSERT OR REPLACE INTO srt_endpoint_location (address, label, lat, lng) '
-                    'VALUES (?,?,?,?)',
+                    'INSERT INTO srt_endpoint_location (address, label, lat, lng) '
+                    'VALUES (?,?,?,?) '
+                    'ON CONFLICT(address) DO UPDATE SET label=excluded.label, lat=excluded.lat, lng=excluded.lng',
                     (ip, label or None, lat_f, lng_f)
                 )
         raise cherrypy.HTTPRedirect('/gateway_geoip?msg=Saved')
@@ -5297,7 +5234,7 @@ async function repoll(){
             devs = c.execute("SELECT id,name,host FROM devices ORDER BY id ASC").fetchall()
             ds_map = {}
             for d in devs:
-                c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (d[0],))
+                c.execute("INSERT INTO device_slack(device_id) VALUES(?) ON CONFLICT DO NOTHING", (d[0],))
                 _SCOLS = ('device_id,notify_session,notify_drops,notify_owd_threshold,'
                           'notify_bitrate_min,notify_poller_error,notify_logs,notify_connection,notify_paused,ignore_contains')
                 r = c.execute('SELECT ' + _SCOLS + ' FROM device_slack WHERE device_id=?', (d[0],)).fetchone()
@@ -5391,7 +5328,7 @@ async function repoll(){
             ).fetchall()
         for gid, gname, ghost in gw_rows:
             with connect_db() as _cgs:
-                _cgs.execute('INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)', (gid,))
+                _cgs.execute('INSERT INTO srt_gw_slack(gw_id) VALUES(?) ON CONFLICT DO NOTHING', (gid,))
                 gs = dict(zip(
                     ['notify_source','notify_client','notify_paused',
                      'thr_bitrate_min','thr_loss_max','thr_lost_max',
@@ -5554,7 +5491,7 @@ async function repoll(){
         lines = [l.strip() for l in (ignore_contains or '').splitlines() if l.strip()]
         ign = _j.dumps(lines, ensure_ascii=False)
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("INSERT INTO device_slack(device_id) VALUES(?) ON CONFLICT DO NOTHING", (did,))
             c.execute("UPDATE device_slack SET notify_session=?,notify_drops=?,"
                       "notify_owd_threshold=?,notify_bitrate_min=?,"
                       "notify_poller_error=?,notify_logs=?,notify_connection=?,ignore_contains=? WHERE device_id=?",
@@ -5568,7 +5505,7 @@ async function repoll(){
         try: did = int(device_id)
         except Exception: raise cherrypy.HTTPRedirect("/settings")
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("INSERT INTO device_slack(device_id) VALUES(?) ON CONFLICT DO NOTHING", (did,))
             c.execute("UPDATE device_slack SET notify_paused=1 WHERE device_id=?", (did,))
         raise cherrypy.HTTPRedirect("/settings?msg=Notifications+paused")
 
@@ -5579,7 +5516,7 @@ async function repoll(){
         try: did = int(device_id)
         except Exception: raise cherrypy.HTTPRedirect("/settings")
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO device_slack(device_id) VALUES(?)", (did,))
+            c.execute("INSERT INTO device_slack(device_id) VALUES(?) ON CONFLICT DO NOTHING", (did,))
             c.execute("UPDATE device_slack SET notify_paused=0 WHERE device_id=?", (did,))
         raise cherrypy.HTTPRedirect("/settings?msg=Notifications+resumed")
 
@@ -5599,7 +5536,7 @@ async function repoll(){
             try: return max(0.0, float(v or 0))
             except: return 0.0
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("INSERT INTO srt_gw_slack(gw_id) VALUES(?) ON CONFLICT DO NOTHING", (gid,))
             c.execute("UPDATE srt_gw_slack SET notify_source=?,notify_client=?,"
                       "thr_bitrate_min=?,thr_loss_max=?,thr_lost_max=?,"
                       "thr_dropped_max=?,thr_retransmit_max=? WHERE gw_id=?",
@@ -5614,7 +5551,7 @@ async function repoll(){
         try: gid = int(gw_id)
         except Exception: raise cherrypy.HTTPRedirect("/settings")
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("INSERT INTO srt_gw_slack(gw_id) VALUES(?) ON CONFLICT DO NOTHING", (gid,))
             c.execute("UPDATE srt_gw_slack SET notify_paused=1 WHERE gw_id=?", (gid,))
         raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+paused")
 
@@ -5625,7 +5562,7 @@ async function repoll(){
         try: gid = int(gw_id)
         except Exception: raise cherrypy.HTTPRedirect("/settings")
         with connect_db() as c:
-            c.execute("INSERT OR IGNORE INTO srt_gw_slack(gw_id) VALUES(?)", (gid,))
+            c.execute("INSERT INTO srt_gw_slack(gw_id) VALUES(?) ON CONFLICT DO NOTHING", (gid,))
             c.execute("UPDATE srt_gw_slack SET notify_paused=0 WHERE gw_id=?", (gid,))
         raise cherrypy.HTTPRedirect("/settings?msg=SRT+Gateway+notifications+resumed")
 
