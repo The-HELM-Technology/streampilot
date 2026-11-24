@@ -222,3 +222,18 @@ def run_py(code, url):
                        env=dict(os.environ, **{_db.ENV_URL: url}))
     assert r.returncode == 0, r.stderr[-1500:]
     return r.stdout.strip()
+
+
+@pytest.fixture
+def pg_empty_url():
+    """A fresh empty Postgres database (skipped unless STREAMPILOT_TEST_PG_URL is set)."""
+    if not PG_URL:
+        pytest.skip("STREAMPILOT_TEST_PG_URL not set")
+    name, url = _new_pg_db()
+    try:
+        yield url
+    finally:
+        _db.close_pool()
+        import psycopg
+        with psycopg.connect(PG_URL, autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
