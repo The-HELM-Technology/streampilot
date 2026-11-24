@@ -102,6 +102,7 @@ You can also specify port, name, max_streamhubs thru the following environment v
 
 > - `-port`: UI TCP port (default: 5555)
 > - `-name`: Generic name displayed in the UI
+> - `-status`: Optional status badge shown next to the name in the header (e.g. `demo` shows in blue, any other value such as `production` in green)
 > - `-max_streamhubs`: Maximum number of StreamHubs polled by the app (default: 4)
 > - `-user`: Username for the login portal (default: admin)
 > - `-password`: Password for the login portal (default: admin)

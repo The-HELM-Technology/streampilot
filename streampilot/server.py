@@ -34,9 +34,15 @@ _dbm.configure(DB_PATH)
 APP_META = {"client": None, "status": None}
 
 def _get_client_status():
-    """Load client/status from environment variables (no YAML)."""
+    """Load client/status from environment variables (CLIENT_NAME / CLIENT_STATUS).
+
+    `status` is an optional badge next to the client name (e.g. "demo" shows in
+    blue, any other value in green). It used to be read from a YAML file; the
+    variable was left undefined when that was replaced by env vars.
+    """
     try:
         client = (os.getenv('CLIENT_NAME') or '').strip() or None
+        status = (os.getenv('CLIENT_STATUS') or '').strip() or None
         APP_META["client"] = client
         APP_META["status"] = status
         return client, status
@@ -745,6 +751,7 @@ def render(tpl, **ctx):
     client, status = _get_client_status()
     ctx.setdefault('client', client)
     ctx.setdefault('status', status)
+    ctx.setdefault('_license_badge_html', _license_badge_html)  # called by base.html inside the status block
     # Provide MAX_STREAMHUB (default 1) and a device_count to all templates
     limit_env = os.getenv('MAX_STREAMHUB')
     try:

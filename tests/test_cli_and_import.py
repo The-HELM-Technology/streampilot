@@ -83,3 +83,60 @@ def test_port_flag_rejects_invalid_value(bad):
     r = subprocess.run([sys.executable, "-m", "streampilot", "-port", bad], cwd=REPO,
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 2 and "-port must be a number" in r.stderr
+
+
+# ---------------------------------------------------------------- status badge
+def _serve(args, tmp_path, extra_env=None):
+    """Start `python -m streampilot *args` on a free port; returns (proc, base_url)."""
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if k not in ("CLIENT_STATUS", "CLIENT_NAME")}
+    env.update(SP_USER="u", SP_PASSWORD="p", STREAMPILOT_DB_URL=f"sqlite:///{tmp_path}/s.db",
+               SP_PORT=str(port), **(extra_env or {}))
+    proc = subprocess.Popen([sys.executable, "-m", "streampilot", *args], cwd=REPO, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        assert proc.poll() is None, "server exited early"
+        try:
+            if requests.get(base + "/login", timeout=1).status_code == 200:
+                return proc, base
+        except requests.RequestException:
+            time.sleep(0.3)
+    proc.terminate()
+    raise AssertionError("server did not start")
+
+
+def _header_html(base):
+    s = requests.Session()
+    s.post(base + "/login_post", data={"username": "u", "password": "p"}, allow_redirects=False)
+    return s.get(base + "/devices").text
+
+
+@pytest.mark.parametrize("status, cls", [("demo", "text-bg-info"), ("Production", "text-bg-success")])
+def test_status_flag_shows_badge(tmp_path, status, cls):
+    proc, base = _serve(["-name", "Acme", "-status", status], tmp_path)
+    try:
+        html = _header_html(base)
+        assert f'badge {cls} ms-2">{status}<' in html
+        assert 'ms-3">Acme<' in html  # the client badge still works
+    finally:
+        proc.terminate(); proc.wait(10)
+
+
+def test_no_status_badge_by_default(tmp_path):
+    proc, base = _serve(["-name", "Acme"], tmp_path)
+    try:
+        html = _header_html(base)
+        assert 'ms-3">Acme<' in html
+        assert "text-bg-info ms-2" not in html and "text-bg-success ms-2" not in html
+    finally:
+        proc.terminate(); proc.wait(10)
+
+
+def test_status_from_environment(tmp_path):
+    proc, base = _serve([], tmp_path, {"CLIENT_STATUS": "demo"})
+    try:
+        assert 'badge text-bg-info ms-2">demo<' in _header_html(base)
+    finally:
+        proc.terminate(); proc.wait(10)
