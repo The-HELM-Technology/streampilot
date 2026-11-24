@@ -12,7 +12,8 @@ if __name__ == "__main__":
     parser.add_argument('-srt_retention_days', type=str,
                         help='number of days to keep SRT route samples (default: 30)', required=False)
     parser.add_argument('-db_url', type=str,
-                        help='database URL, e.g. sqlite:///path/to/mini.db (default: ./mini.db next to the package)',
+                        help='database URL: sqlite:///path/to/mini.db or postgresql://user:pass@host/db '
+                             '(default: mini.db next to the package; Postgres needs the [postgres] extra)',
                         required=False)
     parser.add_argument('-mode', type=str, choices=['http', 'proxy'],
                         help='http = direct (default) | proxy = behind HTTPS reverse proxy', required=False)

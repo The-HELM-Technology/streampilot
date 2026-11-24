@@ -214,3 +214,20 @@ def test_settings_save_paths(app, client):
         assert r.status_code in (200, 302, 303)
     assert app.query("SELECT notify_paused FROM device_slack WHERE device_id=?", (did,))[0][0] == 0
     client.get(app.base + "/devices_delete", params={"id": did}, allow_redirects=False)
+
+
+# ---------------------------------------------------------------- concurrency / pooling
+def test_concurrent_requests_do_not_leak_connections(app, client, imported_session):
+    """On Postgres the app runs with a pool of 4 (see conftest): 120 requests over 4 threads only
+    succeed if every `with connect_db()` block hands its connection back."""
+    from concurrent.futures import ThreadPoolExecutor
+    urls = [app.base + "/logs_ui", app.base + "/devices", app.base + "/health",
+            app.base + f"/log_download?session_id={imported_session}"]
+
+    def hit(i):
+        r = client.get(urls[i % len(urls)], timeout=60)
+        return r.status_code
+
+    with ThreadPoolExecutor(max_workers=4) as ex:  # CherryPy's listen backlog is 5; more workers cause TCP resets
+        codes = list(ex.map(hit, range(120)))
+    assert set(codes) == {200}, {c: codes.count(c) for c in set(codes)}

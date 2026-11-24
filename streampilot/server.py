@@ -2397,11 +2397,9 @@ class App:
 
         # --- Database state ---
         import os
-        db_path = str(DB_PATH)
-        try:
-            db_size_bytes = os.path.getsize(db_path)
-        except Exception:
-            db_size_bytes = 0
+        _dbinfo = _dbm.describe()
+        db_path = _dbinfo["location"]
+        db_size_bytes = _dbinfo["size_bytes"]
         def hsize(n):
             try:
                 n = float(n)
@@ -2453,7 +2451,7 @@ class App:
             '</div></div>',
             # --- DB state card ---
             '<div class="card mb-3"><div class="card-body">',
-            f'<div class="mb-1"><strong>DB file:</strong> <code>{esc(db_path)}</code></div>',
+            f'<div class="mb-1"><strong>Database ({esc(_dbinfo["kind"])}):</strong> <code>{esc(db_path)}</code></div>',
             f'<div class="mb-1"><strong>Size:</strong> {hsize(db_size_bytes)}</div>',
             '</div></div>',
             '<div class="table-responsive">',

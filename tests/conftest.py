@@ -22,7 +22,13 @@ import requests
 REPO = Path(__file__).resolve().parents[1]
 USER, PASSWORD = "tester", "s3cret"
 
-BACKENDS = ["sqlite"]
+# Postgres runs only when STREAMPILOT_TEST_PG_URL points at a server we may create
+# databases on, e.g. postgresql://postgres:test@127.0.0.1:54329/postgres
+PG_URL = os.getenv("STREAMPILOT_TEST_PG_URL")
+BACKENDS = ["sqlite"] + (["postgres"] if PG_URL else [])
+
+sys.path.insert(0, str(REPO))
+from streampilot import db as _db  # noqa: E402  (translate() reused for test-side SQL)
 
 
 def _free_port():
@@ -32,38 +38,53 @@ def _free_port():
 
 
 class App:
-    def __init__(self, root: Path, port: int, backend: str):
-        self.root, self.port, self.backend = root, port, backend
+    def __init__(self, root: Path, port: int, backend: str, db_url: str = None):
+        self.root, self.port, self.backend, self.db_url = root, port, backend, db_url
         self.base = f"http://127.0.0.1:{port}"
         self.db_path = root / "mini.db"
 
-    # -- direct DB seeding for data that has no HTTP entry point (SRT samples, logs).
-    def seed_sql(self, statements):
-        """statements: list of (sql, params) using '?' placeholders."""
-        if self.backend != "sqlite":
-            raise NotImplementedError("postgres seeding is added in Phase 3")
-        con = sqlite3.connect(self.db_path, timeout=10)
-        try:
+    # -- direct DB access for data that has no HTTP entry point (SRT samples, logs).
+    #    SQL is written SQLite-style ('?' placeholders) and translated for Postgres.
+    def _run(self, statements, fetch=False):
+        if self.backend == "sqlite":
+            con = sqlite3.connect(self.db_path, timeout=10)
+            try:
+                out = None
+                for sql, params in statements:
+                    cur = con.execute(sql, params)
+                    out = cur.fetchall() if fetch else None
+                con.commit()
+                return out
+            finally:
+                con.close()
+        import psycopg
+        with psycopg.connect(self.db_url, autocommit=True) as con:
+            out = None
             for sql, params in statements:
-                con.execute(sql, params)
-            con.commit()
-        finally:
-            con.close()
+                cur = con.execute(_db.translate(sql, bool(params)), params or None)
+                out = cur.fetchall() if fetch else None
+            return out
+
+    def seed_sql(self, statements):
+        """statements: list of (sql, params)."""
+        self._run(statements)
 
     def query(self, sql, params=()):
-        if self.backend != "sqlite":
-            raise NotImplementedError("postgres querying is added in Phase 3")
-        con = sqlite3.connect(self.db_path, timeout=10)
-        try:
-            return con.execute(sql, params).fetchall()
-        finally:
-            con.close()
+        return self._run([(sql, params)], fetch=True)
 
 
 @pytest.fixture(scope="session", params=BACKENDS)
 def app(request, tmp_path_factory):
     backend = request.param
     root = tmp_path_factory.mktemp(f"sp_{backend}")
+    pg_dbname = pg_url = None
+    if backend == "postgres":
+        import psycopg
+        from urllib.parse import urlsplit
+        pg_dbname = "sp_test_" + os.urandom(4).hex()
+        with psycopg.connect(PG_URL, autocommit=True) as admin:
+            admin.execute(f'CREATE DATABASE "{pg_dbname}"')
+        pg_url = urlsplit(PG_URL)._replace(path="/" + pg_dbname).geturl()
     shutil.copytree(
         REPO / "streampilot", root / "streampilot",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
@@ -74,12 +95,17 @@ def app(request, tmp_path_factory):
         SP_PORT=str(port), SP_USER=USER, SP_PASSWORD=PASSWORD,
         MAX_STREAMHUB="5", SP_SESSION_SECRET="test-secret",
     )
+    env.pop(_db.ENV_URL, None)
+    if pg_url:
+        env[_db.ENV_URL] = pg_url
+        env["STREAMPILOT_DB_POOL_MAX"] = "4"       # small on purpose: a leaked connection would hang tests
+        env["STREAMPILOT_DB_POOL_TIMEOUT"] = "10"
     log = open(root / "server.log", "w")
     proc = subprocess.Popen(
         [sys.executable, "-m", "streampilot"], cwd=root, env=env,
         stdout=log, stderr=subprocess.STDOUT,
     )
-    a = App(root, port, backend)
+    a = App(root, port, backend, pg_url)
     try:
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -100,6 +126,9 @@ def app(request, tmp_path_factory):
         except subprocess.TimeoutExpired:
             proc.kill()
         log.close()
+        if pg_dbname:
+            with psycopg.connect(PG_URL, autocommit=True) as admin:
+                admin.execute(f'DROP DATABASE IF EXISTS "{pg_dbname}" WITH (FORCE)')
 
 
 @pytest.fixture(scope="session")
@@ -157,3 +186,39 @@ def imported_session(app, client):
     new = {r[0] for r in app.query("SELECT id FROM live_session")} - before
     assert len(new) == 1
     return new.pop()
+
+
+# ---------------------------------------------------------------- per-test databases
+def _new_pg_db():
+    import psycopg
+    from urllib.parse import urlsplit
+    name = "sp_t_" + os.urandom(4).hex()
+    with psycopg.connect(PG_URL, autocommit=True) as admin:
+        admin.execute(f'CREATE DATABASE "{name}"')
+    return name, urlsplit(PG_URL)._replace(path="/" + name).geturl()
+
+
+@pytest.fixture(params=BACKENDS)
+def db_url(request, tmp_path, monkeypatch):
+    """A fresh, empty database URL per test, also exported as STREAMPILOT_DB_URL."""
+    if request.param == "sqlite":
+        url, name = f"sqlite:///{tmp_path}/t.db", None
+    else:
+        name, url = _new_pg_db()
+    monkeypatch.setenv(_db.ENV_URL, url)
+    try:
+        yield url
+    finally:
+        _db.close_pool()
+        if name:
+            import psycopg
+            with psycopg.connect(PG_URL, autocommit=True) as admin:
+                admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+def run_py(code, url):
+    """Run python code with streampilot importable and the DB set to `url`; return stdout."""
+    r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=90,
+                       env=dict(os.environ, **{_db.ENV_URL: url}))
+    assert r.returncode == 0, r.stderr[-1500:]
+    return r.stdout.strip()

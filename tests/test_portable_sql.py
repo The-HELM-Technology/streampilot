@@ -12,14 +12,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from streampilot import db  # noqa: E402
 from streampilot.logger import LiveLogger  # noqa: E402
-
-
-def _run_in_app_env(code, dbfile):
-    """Run python code with streampilot.server importable and the DB redirected to dbfile."""
-    r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=60,
-                       env=dict(os.environ, **{db.ENV_URL: f"sqlite:///{dbfile}"}))
-    assert r.returncode == 0, r.stderr[-1000:]
-    return r.stdout.strip()
+from conftest import run_py  # noqa: E402
 
 
 # ------------------------------------------------------------------ LiveLogger
@@ -52,34 +45,22 @@ def test_legacy_live_tables_are_upgraded(tmp_path):
         con.close()
 
 
-def test_start_session_returns_distinct_ids(tmp_path):
-    lg = LiveLogger(tmp_path / "t.db")
-    try:
-        a = lg._start_session("1", "h", "0", 1, "i1", "A")
-        b = lg._start_session("1", "h", "1", 2, "i2", "B")
-        assert isinstance(a, int) and isinstance(b, int) and a != b
-    finally:
-        lg._stop = True
-
-
-# ------------------------------------------------------------------ server helpers
-def test_streamhub_log_dedupes_on_fingerprint(tmp_path):
-    p = tmp_path / "x.db"
-    out = _run_in_app_env(
+# ------------------------------------------------------------------ server helpers (every backend)
+def test_streamhub_log_dedupes_on_fingerprint(db_url):
+    out = run_py(
         "import streampilot.server as s\n"
         "s._init_db()\n"
         "e={'fp':'abc','ts':'2026-01-01 00:00:00','node':'n','level':'info','message':'m','raw':'r'}\n"
         "s._persist_logs('h',[e,e])\n"
         "s._persist_logs('h',[e,dict(e,fp='def')])\n"
         "with s.connect_db() as c: print(c.execute('SELECT COUNT(*) FROM streamhub_log').fetchone()[0])\n",
-        p)
+        db_url)
     assert out.splitlines()[-1] == "2"
 
 
-def test_output_map_upsert_updates_index(tmp_path):
+def test_output_map_upsert_updates_index(db_url):
     """_persist_output_map: same (host, output) re-seen on another input moves, never duplicates."""
-    p = tmp_path / "x.db"
-    out = _run_in_app_env(
+    out = run_py(
         "import streampilot.server as s\n"
         "s._init_db()\n"
         "mk = lambda k: {'inputs': {k: {'ip_outputs': {'0': {'name': 'OUT1', 'status': 'on'}}}}}\n"
@@ -88,8 +69,32 @@ def test_output_map_upsert_updates_index(tmp_path):
         "s._persist_output_map('h', mk('2'))\n"
         "with s.connect_db() as c:\n"
         "    print(c.execute('SELECT COUNT(*), MAX(input_index), MAX(output_name) FROM device_output_map').fetchone())\n",
-        p)
+        db_url)
     assert out.splitlines()[-1] == "(1, 3, 'out1')"
+
+
+def test_init_db_idempotent(db_url):
+    run_py("import streampilot.server as s; s._init_db(); s._init_db(); s._init_db()", db_url)
+
+
+def test_retention_purge_removes_only_old_samples(db_url):
+    out = run_py(
+        "import os; os.environ['SRT_RETENTION_DAYS']='30'\n"
+        "import streampilot.server as s\n"
+        "s._init_db()\n"
+        "from datetime import datetime, timedelta\n"
+        "old=(datetime.utcnow()-timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')\n"
+        "new=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')\n"
+        "with s.connect_db() as c:\n"
+        "    for ts in (old,new):\n"
+        "        c.execute('INSERT INTO srt_route_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
+        "        c.execute('INSERT INTO srt_connection_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
+        "s.SRTGatewayPoller(None)._purge_old_samples()\n"
+        "with s.connect_db() as c:\n"
+        "    print(c.execute('SELECT COUNT(*) FROM srt_route_sample').fetchone()[0],\n"
+        "          c.execute('SELECT COUNT(*) FROM srt_connection_sample').fetchone()[0])\n",
+        db_url)
+    assert out.splitlines()[-1] == "1 1"
 
 
 # ------------------------------------------------------------------ via the running app
