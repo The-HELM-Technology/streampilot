@@ -22,7 +22,10 @@ if __name__ == "__main__":
     parsed_args = vars(parser.parse_args())
 
     if parsed_args.get('port'):
-        os.environ['StreamPilot'] = parsed_args['port']
+        # run() reads SP_PORT (this used to set an env var that nothing reads, so -port was ignored)
+        if not parsed_args['port'].isdigit() or not (0 < int(parsed_args['port']) < 65536):
+            parser.error(f"-port must be a number between 1 and 65535, got {parsed_args['port']!r}")
+        os.environ['SP_PORT'] = parsed_args['port']
     if parsed_args.get('name'):
         os.environ['CLIENT_NAME'] = parsed_args['name']
     if parsed_args.get('max_streamhubs'):
