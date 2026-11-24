@@ -28,7 +28,7 @@ class LiveLogger:
 
     def _init_db(self):
         with self._conn() as c:
-            c.executescript("""
+            c.execute("""
             CREATE TABLE IF NOT EXISTS live_session (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               device_id TEXT NOT NULL,
@@ -40,10 +40,11 @@ class LiveLogger:
               started_at DATETIME NOT NULL,
               ended_at DATETIME,
               title TEXT
-            );
+            )""")
+            c.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_session_unique
-              ON live_session(device_id, input_key, started_at);
-
+              ON live_session(device_id, input_key, started_at)""")
+            c.execute("""
             CREATE TABLE IF NOT EXISTS live_sample (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               session_id INTEGER NOT NULL,
@@ -55,12 +56,15 @@ class LiveLogger:
               link_name TEXT, owdR INTEGER, rx_bitrate INTEGER,
               rx_percent_lost INTEGER, rx_lost_nb_packets INTEGER,
               FOREIGN KEY(session_id) REFERENCES live_session(id) ON DELETE CASCADE
-            );
-            """)
-            # migration légère si title manquant
-            cols_session = {r[1] for r in c.execute("PRAGMA table_info(live_session)").fetchall()}
-            if 'title' not in cols_session:
-                c.execute("ALTER TABLE live_session ADD COLUMN title TEXT")
+            )""")
+            # migrations for databases created by older releases
+            for table, col, ddl in (
+                ("live_session", "title", "TEXT"),
+                ("live_sample", "rx_percent_lost", "INTEGER"),
+                ("live_sample", "rx_lost_nb_packets", "INTEGER"),
+            ):
+                if not _db.column_exists(c, table, col):
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     def _now_parts(self):
         now = datetime.datetime.utcnow()
@@ -69,11 +73,10 @@ class LiveLogger:
     def _start_session(self, device_id, device_host, input_key, input_index, input_identifier, input_display_name):
         with self._conn() as c:
             now, *_ = self._now_parts()
-            c.execute("""
+            session_id = c.execute("""
               INSERT INTO live_session(device_id, device_host, input_key, input_index, input_identifier, input_display_name, started_at, title)
-              VALUES (?,?,?,?,?,?,?,?)
-            """, (device_id, device_host, input_key, input_index, input_identifier, input_display_name, now.isoformat(), None))
-            session_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+              VALUES (?,?,?,?,?,?,?,?) RETURNING id
+            """, (device_id, device_host, input_key, input_index, input_identifier, input_display_name, now.isoformat(), None)).fetchone()[0]
         return session_id
 
     def _end_session(self, session_id):
