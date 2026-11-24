@@ -34,9 +34,15 @@ _dbm.configure(DB_PATH)
 APP_META = {"client": None, "status": None}
 
 def _get_client_status():
-    """Load client/status from environment variables (no YAML)."""
+    """Load client/status from environment variables (CLIENT_NAME / CLIENT_STATUS).
+
+    `status` is an optional badge next to the client name (e.g. "demo" shows in
+    blue, any other value in green). It used to be read from a YAML file; the
+    variable was left undefined when that was replaced by env vars.
+    """
     try:
         client = (os.getenv('CLIENT_NAME') or '').strip() or None
+        status = (os.getenv('CLIENT_STATUS') or '').strip() or None
         APP_META["client"] = client
         APP_META["status"] = status
         return client, status
@@ -745,6 +751,7 @@ def render(tpl, **ctx):
     client, status = _get_client_status()
     ctx.setdefault('client', client)
     ctx.setdefault('status', status)
+    ctx.setdefault('_license_badge_html', _license_badge_html)  # called by base.html inside the status block
     # Provide MAX_STREAMHUB (default 1) and a device_count to all templates
     limit_env = os.getenv('MAX_STREAMHUB')
     try:
@@ -2209,22 +2216,42 @@ class App:
         except Exception:
             return b"<html><body><p>Invalid JSON</p><a href='/log_import'>Back</a></body></html>"
 
-        sess = (payload or {}).get("session") or {}
-        samples = (payload or {}).get("samples") or []
+        def _invalid(why):
+            cherrypy.response.status = 400
+            return ("<html><body><p>Invalid session file: " + _html.escape(why)
+                    + "</p><a href='/log_import'>Back</a></body></html>").encode('utf-8')
+
+        if not isinstance(payload, dict):
+            return _invalid("expected a JSON object with 'session' and 'samples'")
+        sess = payload.get("session") or {}
+        samples = payload.get("samples") or []
+        if not isinstance(sess, dict) or not isinstance(samples, list):
+            return _invalid("'session' must be an object and 'samples' a list")
+        missing = [k for k in ("device_id", "input_key", "input_index", "started_at") if sess.get(k) in (None, "")]
+        if missing:
+            return _invalid("session is missing " + ", ".join(missing))
 
         with connect_db() as c:
 
             # Insert session (new ID)
             cur = c.execute(
                 "INSERT INTO live_session(device_id, device_host, input_key, input_index, input_identifier, input_display_name, started_at, ended_at, title) "
-                "VALUES(?,?,?,?,?,?,?,?,?) RETURNING id",
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id",
                 (
                     sess.get("device_id"), sess.get("device_host"), sess.get("input_key"), sess.get("input_index"),
                     sess.get("input_identifier"), sess.get("input_display_name"),
                     sess.get("started_at"), sess.get("ended_at"), sess.get("title"),
                 )
             )
-            new_sid = cur.fetchone()[0]
+            row = cur.fetchone()
+            if row is None:  # UNIQUE(device_id, input_key, started_at): this session was imported before
+                from urllib.parse import quote
+                ex = c.execute(
+                    "SELECT id FROM live_session WHERE device_id=? AND input_key=? AND started_at=?",
+                    (sess.get("device_id"), sess.get("input_key"), sess.get("started_at"))).fetchone()
+                raise cherrypy.HTTPRedirect("/logs_ui?msg=" + quote(
+                    f"Session already imported (id {ex[0] if ex else '?'}), nothing changed"))
+            new_sid = row[0]
 
             # Insert samples: expand per-tick links[]
             for s in samples:
