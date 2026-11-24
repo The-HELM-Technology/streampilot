@@ -895,17 +895,38 @@ class SRTGatewayPoller:
             time.sleep(sleep)
 
     def _purge_old_samples(self):
-        """Delete srt_route_sample and srt_connection_sample older than SRT_RETENTION_DAYS."""
+        """Housekeeping, run hourly.
+
+        * srt_route_sample, srt_connection_sample and srt_event older than
+          SRT_RETENTION_DAYS (default 30) are deleted.
+        * streamhub_log older than STREAMHUB_LOG_RETENTION_DAYS is deleted. Off by
+          default (0 = keep forever): these logs feed the timeline/PDF of past
+          sessions, and sessions themselves are never expired. Log lines whose
+          timestamp could not be parsed (NULL ts) are never purged.
+        """
         try:
             days = int(os.getenv('SRT_RETENTION_DAYS') or 30)
         except Exception:
             days = 30
+        try:
+            log_days = int(os.getenv('STREAMHUB_LOG_RETENTION_DAYS') or 0)
+        except Exception:
+            log_days = 0
         from datetime import datetime as _dtp, timedelta as _tdd
-        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        fmt = '%Y-%m-%d %H:%M:%S'
+        now = _dtp.utcnow()
+        cutoff = (now - _tdd(days=days)).strftime(fmt)
         with connect_db() as c:
-            c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,))
-            c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,))
-        cherrypy.log(f'[srt_gw] purged samples older than {days} days (cutoff {cutoff})')
+            n_route = c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,)).rowcount
+            n_conn = c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,)).rowcount
+            n_evt = c.execute('DELETE FROM srt_event WHERE ts < ?', (cutoff,)).rowcount
+            n_log = 0
+            if log_days > 0:
+                log_cutoff = (now - _tdd(days=log_days)).strftime(fmt)
+                n_log = c.execute('DELETE FROM streamhub_log WHERE ts < ?', (log_cutoff,)).rowcount
+        cherrypy.log(f'[srt_gw] purged older than {days} days (cutoff {cutoff}): '
+                     f'{n_route} route samples, {n_conn} connection samples, {n_evt} events'
+                     + (f'; streamhub logs older than {log_days} days: {n_log}' if log_days > 0 else ''))
 
     def _poll_all(self):
         with connect_db() as c:

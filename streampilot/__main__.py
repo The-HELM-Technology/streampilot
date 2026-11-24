@@ -10,7 +10,9 @@ if __name__ == "__main__":
     parser.add_argument('-max_srtgateway', type=str,
                         help='maximum number of SRT Gateways to monitor (default: unlimited)', required=False)
     parser.add_argument('-srt_retention_days', type=str,
-                        help='number of days to keep SRT route samples (default: 30)', required=False)
+                        help='number of days to keep SRT Gateway samples and events (default: 30)', required=False)
+    parser.add_argument('-streamhub_log_retention_days', type=str,
+                        help='days to keep StreamHub logs (default: 0 = keep forever)', required=False)
     parser.add_argument('-db_url', type=str,
                         help='database URL: sqlite:///path/to/mini.db or postgresql://user:pass@host/db '
                              '(default: mini.db next to the package; Postgres needs the [postgres] extra)',
@@ -33,6 +35,8 @@ if __name__ == "__main__":
         os.environ['MAX_SRTGATEWAY'] = parsed_args['max_srtgateway']
     if parsed_args.get('srt_retention_days'):
         os.environ['SRT_RETENTION_DAYS'] = parsed_args['srt_retention_days']
+    if parsed_args.get('streamhub_log_retention_days'):
+        os.environ['STREAMHUB_LOG_RETENTION_DAYS'] = parsed_args['streamhub_log_retention_days']
     if parsed_args.get('mode'):
         os.environ['SP_MODE'] = parsed_args['mode']
     if parsed_args.get('db_url'):

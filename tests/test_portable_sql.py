@@ -77,24 +77,42 @@ def test_init_db_idempotent(db_url):
     run_py("import streampilot.server as s; s._init_db(); s._init_db(); s._init_db()", db_url)
 
 
-def test_retention_purge_removes_only_old_samples(db_url):
-    out = run_py(
-        "import os; os.environ['SRT_RETENTION_DAYS']='30'\n"
-        "import streampilot.server as s\n"
-        "s._init_db()\n"
-        "from datetime import datetime, timedelta\n"
-        "old=(datetime.utcnow()-timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')\n"
-        "new=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')\n"
-        "with s.connect_db() as c:\n"
-        "    for ts in (old,new):\n"
-        "        c.execute('INSERT INTO srt_route_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
-        "        c.execute('INSERT INTO srt_connection_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
-        "s.SRTGatewayPoller(None)._purge_old_samples()\n"
-        "with s.connect_db() as c:\n"
-        "    print(c.execute('SELECT COUNT(*) FROM srt_route_sample').fetchone()[0],\n"
-        "          c.execute('SELECT COUNT(*) FROM srt_connection_sample').fetchone()[0])\n",
-        db_url)
-    assert out.splitlines()[-1] == "1 1"
+_PURGE_SEED = (
+    "import streampilot.server as s\n"
+    "s._init_db()\n"
+    "from datetime import datetime, timedelta\n"
+    "fmt='%Y-%m-%d %H:%M:%S'\n"
+    "ago=lambda d:(datetime.utcnow()-timedelta(days=d)).strftime(fmt)\n"
+    "with s.connect_db() as c:\n"
+    "    for ts in (ago(90), ago(1)):\n"
+    "        c.execute('INSERT INTO srt_route_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
+    "        c.execute('INSERT INTO srt_connection_sample(device_host,route_id,ts) VALUES(?,?,?)',('h','r',ts))\n"
+    "        c.execute('INSERT INTO srt_event(device_host,route_id,ts,event_type) VALUES(?,?,?,?)',('h','r',ts,'e'))\n"
+    "    for i, ts in enumerate((ago(90), ago(1), None)):\n"
+    "        c.execute('INSERT INTO streamhub_log(device_host,ts,message,fp) VALUES(?,?,?,?)',('h',ts,'m','f%d'%i))\n"
+    "s.SRTGatewayPoller(None)._purge_old_samples()\n"
+    "with s.connect_db() as c:\n"
+    "    q=lambda t: c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0]\n"
+    "    print(q('srt_route_sample'), q('srt_connection_sample'), q('srt_event'), q('streamhub_log'))\n"
+)
+
+
+def test_retention_purge_removes_only_old_srt_data(db_url):
+    """Samples AND events older than SRT_RETENTION_DAYS go; StreamHub logs are kept by default."""
+    out = run_py(_PURGE_SEED, db_url, SRT_RETENTION_DAYS="30")
+    assert out.splitlines()[-1] == "1 1 1 3"
+
+
+def test_streamhub_log_retention_opt_in(db_url):
+    """With STREAMHUB_LOG_RETENTION_DAYS set, old logs go; recent and un-timestamped ones stay."""
+    out = run_py(_PURGE_SEED, db_url, SRT_RETENTION_DAYS="30", STREAMHUB_LOG_RETENTION_DAYS="30")
+    assert out.splitlines()[-1] == "1 1 1 2"
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", ""])
+def test_streamhub_log_retention_ignores_disabled_or_invalid(db_url, bad):
+    out = run_py(_PURGE_SEED, db_url, SRT_RETENTION_DAYS="30", STREAMHUB_LOG_RETENTION_DAYS=bad)
+    assert out.splitlines()[-1] == "1 1 1 3"
 
 
 # ------------------------------------------------------------------ via the running app

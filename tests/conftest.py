@@ -216,10 +216,10 @@ def db_url(request, tmp_path, monkeypatch):
                 admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
-def run_py(code, url):
+def run_py(code, url, **env):
     """Run python code with streampilot importable and the DB set to `url`; return stdout."""
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=90,
-                       env=dict(os.environ, **{_db.ENV_URL: url}))
+                       env=dict(os.environ, **{_db.ENV_URL: url}, **env))
     assert r.returncode == 0, r.stderr[-1500:]
     return r.stdout.strip()
 
