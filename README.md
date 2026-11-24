@@ -107,7 +107,8 @@ You can also specify port, name, max_streamhubs thru the following environment v
 > - `-password`: Password for the login portal (default: admin)
 > - `-mode`: If working behind a Nginx, hosting HTTPS certificates (default: proxy)
 > - `-max_srtgateway`: Maximum number of SRT Gateway devices (default: unlimited)
-> - `-srt_retention_days`: Sample retention in days for SRT Gateway (default: 30)
+> - `-srt_retention_days`: Retention in days for SRT Gateway samples **and events** (default: 30)
+> - `-streamhub_log_retention_days`: Retention in days for StreamHub logs (default: 0 = keep forever). These logs feed the timeline and PDF of past sessions, so enable it only if you also delete old sessions
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
