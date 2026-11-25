@@ -12,7 +12,7 @@ description = "Stream smarter. Pilot with precision. Broadcast better."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LGPL-2.1-or-later"
-license-files = ["README_LICENSE_SECTION.md", "LICENSE"]
+license-files = ["README_LICENSE_SECTION.md", "LICENSE", "LICENSES/*.txt"]
 keywords = ["gps", "4G", "5G", "SRT", "haivision"]
 dependencies = [
   "requests",

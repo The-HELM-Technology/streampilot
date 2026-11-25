@@ -46,7 +46,7 @@ Just because I needed a tool for site surveys and live production in my company 
 ## Prerequisites
 
 - Debian 13
-- Python ≥ 3.13
+- Python ≥ 3.11
 
 ## Installation
 
@@ -98,19 +98,19 @@ location / {
 bin/python -m streampilot -port 5555 -name "John Dear" -max_streamhubs 4 -max_srtgateway 2 -user 'admin' -password 'password' -mode proxy
 ```
 
-You can also specify port, name, max_streamhubs thru the following environment variables:
+Command-line flags, with the equivalent environment variable for each one:
 
-> - `-port`: UI TCP port (default: 5555)
-> - `-name`: Generic name displayed in the UI
-> - `-status`: Optional status badge shown next to the name in the header (e.g. `demo` shows in blue, any other value such as `production` in green)
-> - `-max_streamhubs`: Maximum number of StreamHubs polled by the app (default: 4)
-> - `-user`: Username for the login portal (default: admin)
-> - `-password`: Password for the login portal (default: admin)
-> - `-mode`: If working behind a Nginx, hosting HTTPS certificates (default: proxy)
-> - `-max_srtgateway`: Maximum number of SRT Gateway devices (default: unlimited)
-> - `-srt_retention_days`: Retention in days for SRT Gateway samples **and events** (default: 30)
-> - `-streamhub_log_retention_days`: Retention in days for StreamHub logs (default: 0 = keep forever). These logs feed the timeline and PDF of past sessions, so enable it only if you also delete old sessions
-> - `-db_url`: Database URL, `sqlite:///path/to/mini.db` or `postgresql://user:pass@host/dbname` (default: `mini.db` next to the package) — see [Database](#database)
+> - `-port` (`SP_PORT`): UI TCP port (default: 5555)
+> - `-name` (`CLIENT_NAME`): Generic name displayed in the UI
+> - `-status` (`CLIENT_STATUS`): Optional status badge shown next to the name in the header (e.g. `demo` shows in blue, any other value such as `production` in green)
+> - `-max_streamhubs` (`MAX_STREAMHUB`): Maximum number of StreamHubs polled by the app (default: 1)
+> - `-user` (`SP_USER`): Username for the login portal (default: admin)
+> - `-password` (`SP_PASSWORD`): Password for the login portal (default: admin)
+> - `-mode` (`SP_MODE`): `http` for direct access, `proxy` when working behind a Nginx hosting HTTPS certificates (default: http)
+> - `-max_srtgateway` (`MAX_SRTGATEWAY`): Maximum number of SRT Gateway devices (default: unlimited)
+> - `-srt_retention_days` (`SRT_RETENTION_DAYS`): Retention in days for SRT Gateway samples **and events** (default: 30)
+> - `-streamhub_log_retention_days` (`STREAMHUB_LOG_RETENTION_DAYS`): Retention in days for StreamHub logs (default: 0 = keep forever). These logs feed the timeline and PDF of past sessions, so enable it only if you also delete old sessions
+> - `-db_url` (`STREAMPILOT_DB_URL`): Database URL, `sqlite:///path/to/mini.db` or `postgresql://user:pass@host/dbname` (default: `mini.db` next to the package) — see [Database](#database)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).
 
@@ -425,6 +425,8 @@ for PostgreSQL by `streampilot/db.py`; avoid SQLite-only constructs (`INSERT OR 
 
 ## License
 
+StreamPilot is licensed under **LGPL-2.1-or-later**. The full licence texts are in the `LICENSES/` folder (`LICENSES/LGPL-2.1.txt` and `LICENSES/GPL-2.0.txt`).
+
 StreamPilot — Copyright (C) 2026 Alexandre Licinio
 
 This program is free software: you can redistribute it and/or modify it
@@ -438,5 +440,5 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU Lesser General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public License
-along with this program in the file COPYING.LESSER. If not, see:
+along with this program in the file LICENSES/LGPL-2.1.txt. If not, see:
 https://www.gnu.org/licenses/

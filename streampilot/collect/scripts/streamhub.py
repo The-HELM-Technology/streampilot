@@ -104,7 +104,7 @@ def _fetch_logs(session: requests.Session, base_url: str, token: str, timeout: i
         if p in seen:
             continue
         seen.add(p)
-        url = _full_url(base_url, f"{p}?limit={int(limit)}", token)
+        url = _full_url(base_url, p, token) + f"&limit={int(limit)}"
         ok, data, _ = _get_json_or_text(session, url, timeout=timeout)
         if not ok:
             continue
