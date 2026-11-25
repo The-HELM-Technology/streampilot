@@ -52,7 +52,7 @@ def test_device_add_and_delete(app, client):
     rows = app.query("SELECT id, name FROM devices WHERE name='SH-test'")
     assert len(rows) == 1
     assert "SH-test" in client.get(app.base + "/devices").text
-    client.get(app.base + "/devices_delete", params={"id": rows[0][0]}, allow_redirects=False)
+    client.post(app.base + "/devices_delete", data={"id": rows[0][0]}, allow_redirects=False)
     assert app.query("SELECT id FROM devices WHERE name='SH-test'") == []
 
 
@@ -90,18 +90,18 @@ def test_session_pdf(app, client, imported_session):
 
 
 def test_rename_stop_delete(app, client, imported_session):
-    client.get(app.base + "/log_rename", params={"session_id": imported_session, "title": "renamed"},
+    client.post(app.base + "/log_rename", data={"session_id": imported_session, "title": "renamed"},
                allow_redirects=False)
     assert app.query("SELECT title FROM live_session WHERE id=?", (imported_session,))[0][0] == "renamed"
-    client.get(app.base + "/log_stop", params={"session_id": imported_session}, allow_redirects=False)
+    client.post(app.base + "/log_stop", data={"session_id": imported_session}, allow_redirects=False)
     assert app.query("SELECT ended_at FROM live_session WHERE id=?", (imported_session,))[0][0]
-    client.get(app.base + "/log_delete", params={"session_id": imported_session}, allow_redirects=False)
+    client.post(app.base + "/log_delete", data={"session_id": imported_session}, allow_redirects=False)
     assert app.query("SELECT id FROM live_session WHERE id=?", (imported_session,)) == []
     assert app.query("SELECT id FROM live_sample WHERE session_id=?", (imported_session,)) == []
 
 
 def test_purge_all(app, client, imported_session):
-    client.get(app.base + "/log_purge", allow_redirects=False)
+    client.post(app.base + "/log_purge", allow_redirects=False)
     assert app.query("SELECT COUNT(*) FROM live_session")[0][0] == 0
     assert app.query("SELECT COUNT(*) FROM live_sample")[0][0] == 0
 
@@ -175,13 +175,13 @@ def test_gateway_report_lifecycle(app, client, srt_gateway):
     assert r.status_code == 200 and r.json()
     r = client.get(app.base + "/gateway_report_pdf", params={"report_id": rid, "tz_offset": "0"})
     assert r.status_code == 200 and r.content.startswith(b"%PDF")
-    client.get(app.base + "/gateway_report_delete", params={"report_id": rid, "host": GW, "route_id": ROUTE},
+    client.post(app.base + "/gateway_report_delete", data={"report_id": rid, "host": GW, "route_id": ROUTE},
                allow_redirects=False)
     assert app.query("SELECT id FROM srt_report_session WHERE id=?", (rid,)) == []
 
 
 def test_gateway_logs_delete(app, client, srt_gateway):
-    client.get(app.base + "/gateway_logs_delete", params={"host": GW, "route_id": ROUTE}, allow_redirects=False)
+    client.post(app.base + "/gateway_logs_delete", data={"host": GW, "route_id": ROUTE}, allow_redirects=False)
     assert app.query("SELECT COUNT(*) FROM srt_event WHERE device_host=?", (GW,))[0][0] == 0
 
 
@@ -193,7 +193,7 @@ def test_geoip_save_delete(app, client):
     client.post(app.base + "/gateway_geoip_save",
                 data={"ip": "198.51.100.7", "lat": "3", "lng": "4", "label": "lab2"}, allow_redirects=False)
     assert app.query("SELECT label FROM srt_endpoint_location WHERE address=?", ("198.51.100.7",))[0][0] == "lab2"
-    client.get(app.base + "/gateway_geoip_delete", params={"ip": "198.51.100.7"}, allow_redirects=False)
+    client.post(app.base + "/gateway_geoip_delete", data={"ip": "198.51.100.7"}, allow_redirects=False)
     assert app.query("SELECT 1 FROM srt_endpoint_location WHERE address=?", ("198.51.100.7",)) == []
 
 
@@ -210,10 +210,10 @@ def test_settings_save_paths(app, client):
                     allow_redirects=False)
     assert r.status_code in (200, 302, 303)
     for p in ("/settings_device_pause", "/settings_device_resume"):
-        r = client.get(app.base + p, params={"device_id": did}, allow_redirects=False)
+        r = client.post(app.base + p, data={"device_id": did}, allow_redirects=False)
         assert r.status_code in (200, 302, 303)
     assert app.query("SELECT notify_paused FROM device_slack WHERE device_id=?", (did,))[0][0] == 0
-    client.get(app.base + "/devices_delete", params={"id": did}, allow_redirects=False)
+    client.post(app.base + "/devices_delete", data={"id": did}, allow_redirects=False)
 
 
 # ---------------------------------------------------------------- concurrency / pooling

@@ -117,6 +117,7 @@ Copyright (C) 2026 Alexandre Licinio
   });
 
   // ── Events — fetched from DB ─────────────────────────────────────────────
+  function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
   function pollEvents(host, tbodyId){
     fetch('/gateway_events?host=' + encodeURIComponent(host) + '&limit=10')
       .then(function(r){ return r.json(); })
@@ -132,14 +133,14 @@ Copyright (C) 2026 Alexandre Licinio
           var type = e.type || '';
           var badge;
           if(type.indexOf('started') >= 0 || type.indexOf('connected') >= 0){
-            badge = '<span class="badge text-bg-success">' + type + '</span>';
+            badge = '<span class="badge text-bg-success">' + esc(type) + '</span>';
           } else if(type.indexOf('stopped') >= 0 || type.indexOf('disconnected') >= 0){
-            badge = '<span class="badge text-bg-danger">' + type + '</span>';
+            badge = '<span class="badge text-bg-danger">' + esc(type) + '</span>';
           } else {
-            badge = '<span class="badge text-bg-secondary">' + type + '</span>';
+            badge = '<span class="badge text-bg-secondary">' + esc(type) + '</span>';
           }
-          var detail = e.detail ? '<span class="text-muted small ms-1">'+e.detail+'</span>' : '';
-          var ipCell = e.ip ? '<td class="font-monospace small">'+e.ip+'</td>' : '<td class="text-muted">—</td>';
+          var detail = e.detail ? '<span class="text-muted small ms-1">'+esc(e.detail)+'</span>' : '';
+          var ipCell = e.ip ? '<td class="font-monospace small">'+esc(e.ip)+'</td>' : '<td class="text-muted">—</td>';
           var raw=e.ts||'', datePart='';
           if(raw.length>=10){var d=raw.slice(0,10).split('-');datePart=d[2]+'/'+d[1]+'/'+d[0];}
           var localStr='';
@@ -147,9 +148,9 @@ Copyright (C) 2026 Alexandre Licinio
             localStr=ldt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
           }catch(_){}}
           return '<tr><td class="text-muted small">'+localStr+'</td>'
-               + '<td class="text-muted small">'+datePart+'</td>'
-               + '<td class="text-muted small">'+raw.slice(11,19)+'</td>'
-               + '<td class="small">'+(e.route||'')+'</td>'
+               + '<td class="text-muted small">'+esc(datePart)+'</td>'
+               + '<td class="text-muted small">'+esc(raw.slice(11,19))+'</td>'
+               + '<td class="small">'+esc(e.route||'')+'</td>'
                + '<td>'+badge+detail+'</td>'
                + ipCell+'</tr>';
         }).join('');
@@ -230,7 +231,7 @@ Copyright (C) 2026 Alexandre Licinio
         + '<td class="fw-semibold">'
         + '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
         + 'background:' + rcolor + ';margin-right:6px;flex-shrink:0"></span>'
-        + r.name + retBadge + '</td>'
+        + esc(r.name) + retBadge + '</td>'
         + '<td>' + sbadge + '</td>'
         + '<td>' + br + '</td>'
         + '<td>' + rtt + '</td>'
@@ -304,7 +305,7 @@ Copyright (C) 2026 Alexandre Licinio
             mg.markers[mkey]=L.circleMarker([gs.lat,gs.lng],
               {radius:10,color:col,fillColor:col,fillOpacity:0.9})
               .addTo(mg.map)
-              .bindPopup('<b>'+rname+'</b><br>Source: '+(sname||sip)+'<br>'+(gs.label||''));
+              .bindPopup('<b>'+esc(rname)+'</b><br>Source: '+esc(sname||sip)+'<br>'+esc(gs.label||''));
         }
         (r.destinations||[]).forEach(function(dst,di){
           var clients=[];
@@ -321,10 +322,10 @@ Copyright (C) 2026 Alexandre Licinio
               mg.markers[ckey]=L.circleMarker([gc.lat,gc.lng],
                 {radius:8,color:col,fillColor:col,fillOpacity:0.9})
                 .addTo(mg.map)
-                .bindPopup('<b>'+cl.address+'</b><br>'+(gc.label||''));
+                .bindPopup('<b>'+esc(cl.address)+'</b><br>'+esc(gc.label||''));
             if(gs){
               var dist=haversine(gs.lat,gs.lng,gc.lat,gc.lng);
-              var pop='<b>'+rname+'</b><br>'
+              var pop='<b>'+esc(rname)+'</b><br>'
                 +(brMbps!=null?'Bitrate: '+brMbps.toFixed(2)+' Mb/s<br>':'')
                 +(cl.srtRoundTripTime!=null?'RTT: '+cl.srtRoundTripTime.toFixed(1)+' ms<br>':'')
                 +dist+' km';
