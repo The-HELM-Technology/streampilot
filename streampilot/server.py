@@ -84,6 +84,40 @@ class BackgroundPoller:
         self.slack_seen_max = 4000
         self.alert_state = {}         # host -> {owd,bitrate,drops,error,active_sessions}
         self._slack_initialized = set()
+        # Latest fetch result per device id, shared with /data (guarded by _latest_lock)
+        self._latest_lock = threading.Lock()
+        self._latest = {}             # device id -> (base, ok, payload, wall-clock time)
+
+    # ── Latest result cache ───────────────────────────────────────────────
+
+    def _set_latest(self, device_id, base, ok, payload):
+        with self._latest_lock:
+            self._latest[int(device_id)] = (base, ok, payload, time.time())
+
+    def _prune_latest(self, device_ids):
+        keep = {int(i) for i in device_ids}
+        with self._latest_lock:
+            for k in [k for k in self._latest if k not in keep]:
+                del self._latest[k]
+
+    def get_latest(self, device_id, base, max_age=None):
+        """Return (ok, payload, wall-clock time) of the last poll of this device if it was fetched
+        from the same base URL and is younger than max_age seconds (default: 3 poll intervals),
+        else None."""
+        if max_age is None:
+            max_age = 3 * self.interval
+        try:
+            key = int(device_id)
+        except Exception:
+            return None
+        with self._latest_lock:
+            entry = self._latest.get(key)
+        if not entry:
+            return None
+        e_base, ok, payload, at = entry
+        if e_base != base or (time.time() - at) > max_age:
+            return None
+        return ok, payload, at
 
     # ── Slack helpers ─────────────────────────────────────────────────────
 
@@ -284,6 +318,7 @@ class BackgroundPoller:
                 with connect_db() as conn:
                     cur = conn.execute("SELECT id,name,protocol,host,port,api_path,token FROM devices")
                     rows = cur.fetchall()
+                self._prune_latest([r[0] for r in rows])
 
                 for row in rows:
                     try:
@@ -296,6 +331,7 @@ class BackgroundPoller:
                             p = 8896
                         base = f"{protocol}://{host}:{p}"
                         ok, payload = fetch_streamhub(base, token or None, timeout=5)
+                        self._set_latest(did, base, ok, payload)
                         # Always observe, even if not ok (logger can decide)
                         try:
                             device_id = (payload.get('characteristics') or {}).get('identifier') \
@@ -922,39 +958,81 @@ class SRTGatewayPoller:
             sleep = max(0, self.interval - elapsed)
             time.sleep(sleep)
 
+    @staticmethod
+    def _retention_days(env_name, default):
+        try:
+            v = os.getenv(env_name)
+            return int(v) if (v is not None and str(v).strip() != '') else default
+        except Exception:
+            return default
+
     def _purge_old_samples(self):
         """Housekeeping, run hourly.
 
-        * srt_route_sample, srt_connection_sample and srt_event older than
-          SRT_RETENTION_DAYS (default 30) are deleted.
-        * streamhub_log older than STREAMHUB_LOG_RETENTION_DAYS is deleted. Off by
-          default (0 = keep forever): these logs feed the timeline/PDF of past
-          sessions, and sessions themselves are never expired. Log lines whose
-          timestamp could not be parsed (NULL ts) are never purged.
+        * srt_route_sample, srt_connection_sample and srt_event older than SRT_RETENTION_DAYS
+          (default 30) are deleted.
+        * Ended live sessions (and their samples) older than SESSION_RETENTION_DAYS are deleted.
+          Off by default (0 = keep forever). Sessions still active are never deleted.
+        * streamhub_log older than STREAMHUB_LOG_RETENTION_DAYS is deleted. Off by default
+          (0 = keep forever). Logs inside the time window of an existing session on the same
+          device are always kept (the session timeline and PDF report use them), and log lines
+          whose timestamp could not be parsed (NULL ts) are never purged.
         """
-        try:
-            days = int(os.getenv('SRT_RETENTION_DAYS') or 30)
-        except Exception:
+        days = self._retention_days('SRT_RETENTION_DAYS', 30)
+        if days < 1:  # 0 / negative / invalid would delete everything immediately: use the default
             days = 30
-        try:
-            log_days = int(os.getenv('STREAMHUB_LOG_RETENTION_DAYS') or 0)
-        except Exception:
-            log_days = 0
         from datetime import datetime as _dtp, timedelta as _tdd
-        fmt = '%Y-%m-%d %H:%M:%S'
-        now = _dtp.utcnow()
-        cutoff = (now - _tdd(days=days)).strftime(fmt)
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
         with connect_db() as c:
             n_route = c.execute('DELETE FROM srt_route_sample WHERE ts < ?', (cutoff,)).rowcount
             n_conn = c.execute('DELETE FROM srt_connection_sample WHERE ts < ?', (cutoff,)).rowcount
             n_evt = c.execute('DELETE FROM srt_event WHERE ts < ?', (cutoff,)).rowcount
-            n_log = 0
-            if log_days > 0:
-                log_cutoff = (now - _tdd(days=log_days)).strftime(fmt)
-                n_log = c.execute('DELETE FROM streamhub_log WHERE ts < ?', (log_cutoff,)).rowcount
         cherrypy.log(f'[srt_gw] purged older than {days} days (cutoff {cutoff}): '
-                     f'{n_route} route samples, {n_conn} connection samples, {n_evt} events'
-                     + (f'; streamhub logs older than {log_days} days: {n_log}' if log_days > 0 else ''))
+                     f'{n_route} route samples, {n_conn} connection samples, {n_evt} events')
+        # Sessions first: logs that were only kept for the sake of a purged session can then go too
+        try:
+            self._purge_old_sessions()
+        except Exception as _se:
+            cherrypy.log(f'[retention] session purge error: {_se}')
+        try:
+            self._purge_old_logs()
+        except Exception as _le:
+            cherrypy.log(f'[retention] log purge error: {_le}')
+
+    def _purge_old_sessions(self):
+        days = self._retention_days('SESSION_RETENTION_DAYS', 0)
+        if days <= 0:
+            return
+        from datetime import datetime as _dtp, timedelta as _tdd
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        # live_session timestamps are ISO ('YYYY-MM-DDTHH:MM:SS.ffffff'): normalise before comparing
+        cond = ("ended_at IS NOT NULL AND ended_at <> '' "
+                "AND replace(substr(ended_at,1,19),'T',' ') < ?")
+        with connect_db() as c:
+            c.execute('DELETE FROM live_sample WHERE session_id IN '
+                      '(SELECT id FROM live_session WHERE ' + cond + ')', (cutoff,))
+            n = c.execute('DELETE FROM live_session WHERE ' + cond, (cutoff,)).rowcount
+        cherrypy.log(f'[retention] purged {n} session(s) ended more than {days} days ago (cutoff {cutoff})')
+
+    def _purge_old_logs(self):
+        days = self._retention_days('STREAMHUB_LOG_RETENTION_DAYS', 0)
+        if days <= 0:
+            return
+        from datetime import datetime as _dtp, timedelta as _tdd
+        cutoff = (_dtp.utcnow() - _tdd(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        # streamhub_log.ts is 'YYYY-MM-DD HH:MM:SS', live_session uses ISO with 'T' and microseconds:
+        # compare on the first 19 chars with 'T' replaced, exactly like the session report queries do.
+        with connect_db() as c:
+            n = c.execute(
+                "DELETE FROM streamhub_log WHERE ts < ? AND NOT EXISTS ("
+                " SELECT 1 FROM live_session s"
+                " WHERE s.device_host = streamhub_log.device_host"
+                " AND replace(substr(s.started_at,1,19),'T',' ') <= streamhub_log.ts"
+                " AND (s.ended_at IS NULL OR s.ended_at = ''"
+                "      OR replace(substr(s.ended_at,1,19),'T',' ') >= streamhub_log.ts))",
+                (cutoff,)
+            ).rowcount
+        cherrypy.log(f'[retention] purged {n} StreamHub log(s) older than {days} days (cutoff {cutoff})')
 
     def _poll_all(self):
         with connect_db() as c:
@@ -2763,9 +2841,20 @@ class App:
 
         # Pour StreamHub “ancien probe”, on tape la racine + ?api_key=
         base = f"{d['protocol']}://{d['host']}:{d['port']}"
-        ok, payload = fetch_streamhub(base, d.get("token") or None, timeout=5)
         import json
-        
+        # Serve the background poller's latest result when it is fresh: it already fetched (and
+        # observed) this device, so there is no need to hit the device again for every browser.
+        cached = None
+        try:
+            if POLLER is not None:
+                cached = POLLER.get_latest(d['id'], base)
+        except Exception:
+            cached = None
+        if cached is not None:
+            ok, payload, fetched_at = cached
+            return json.dumps({"ok": ok, "payload": payload, "timestamp": int(fetched_at*1000)}).encode("utf-8")
+        ok, payload = fetch_streamhub(base, d.get("token") or None, timeout=5)
+
         # Observe payload for live logging
         try:
             device_id = (payload.get('characteristics') or {}).get('identifier') \
