@@ -109,7 +109,8 @@ Command-line flags, with the equivalent environment variable for each one:
 > - `-mode` (`SP_MODE`): `http` for direct access, `proxy` when working behind a Nginx hosting HTTPS certificates (default: http)
 > - `-max_srtgateway` (`MAX_SRTGATEWAY`): Maximum number of SRT Gateway devices (default: unlimited)
 > - `-srt_retention_days` (`SRT_RETENTION_DAYS`): Retention in days for SRT Gateway samples **and events** (default: 30)
-> - `-streamhub_log_retention_days` (`STREAMHUB_LOG_RETENTION_DAYS`): Retention in days for StreamHub logs (default: 0 = keep forever). These logs feed the timeline and PDF of past sessions, so enable it only if you also delete old sessions
+> - `-streamhub_log_retention_days` (`STREAMHUB_LOG_RETENTION_DAYS`): Retention in days for StreamHub logs (default: `0` = keep forever). Logs that fall inside the time window of a recorded session are always kept as long as that session exists, because its timeline and PDF report use them
+> - `-session_retention_days` (`SESSION_RETENTION_DAYS`): Retention in days for ended recorded sessions and their samples; sessions still active are never deleted (default: `0` = keep forever). Logs that were only kept for a deleted session become eligible for `-streamhub_log_retention_days`
 > - `-db_url` (`STREAMPILOT_DB_URL`): Database URL, `sqlite:///path/to/mini.db` or `postgresql://user:pass@host/dbname` (default: `mini.db` next to the package) — see [Database](#database)
 
 The app will be available at [http://localhost:5555](http://localhost:5555).

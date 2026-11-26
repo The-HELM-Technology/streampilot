@@ -20,8 +20,10 @@ class LiveLogger:
         self._stop = False
         self.sessions_en_cours: Dict[Tuple[str,str], Dict[str, Any]] = {}
         self._thread = threading.Thread(target=self._run_ticker, name="live_logger_ticker", daemon=True)
-        self._thread.start()
+        # Schema + orphan cleanup must be done before the ticker can write
         self._init_db()
+        self._close_orphaned_sessions()
+        self._thread.start()
 
     def _conn(self):
         return _db.connect(self.db_path, timeout=2.0, busy_ms=2000)
@@ -65,6 +67,30 @@ class LiveLogger:
             ):
                 if not _db.column_exists(c, table, col):
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+    def _close_orphaned_sessions(self):
+        """Close sessions left open by a previous run (open sessions are only tracked in memory,
+        so after a restart they would stay 'live' forever).
+        ended_at = timestamp of the last sample, or started_at if the session has none."""
+        try:
+            with self._conn() as c:
+                n = c.execute("""
+                  UPDATE live_session
+                     SET ended_at = COALESCE(
+                           (SELECT MAX(ts) FROM live_sample WHERE session_id = live_session.id),
+                           started_at)
+                   WHERE ended_at IS NULL
+                """).rowcount
+            if n and n > 0:
+                try:
+                    import cherrypy; cherrypy.log(f"live_logger: closed {n} orphaned session(s) at startup")
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                import cherrypy; cherrypy.log('live_logger: orphaned session cleanup error', traceback=True)
+            except Exception:
+                pass
 
     def _now_parts(self):
         now = datetime.datetime.utcnow()
@@ -296,11 +322,6 @@ class LiveLogger:
                                 'rx_lost_nb_packets': rx_lost_nb_packets
                             })
                         # Always append a sample every tick (even if no links)
-                        try:
-                            import cherrypy
-                            cherrypy.log(f"live_tick session={info['session_id']} dev={dev_id} in={input_key} links={len(link_rows)} lat={(gps or {}).get('lat')} lng={(gps or {}).get('lng')}")
-                        except Exception:
-                            pass
                         batch_rows.extend(self._build_rows(info['session_id'], gps, drops, link_rows))
                 # flush outside the lock
                 try:
